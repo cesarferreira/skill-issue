@@ -125,6 +125,7 @@ pub fn run(cli: Cli) -> Result<u8> {
                 Command::Targets { command } => targets_command(config, command, cli.dry_run),
                 Command::Config { command } => config_command(config, command, cli.dry_run),
                 Command::Restore => restore_command(&config, cli.dry_run),
+                Command::Sync { check } => sync_command(&config, check, cli.dry_run),
                 Command::Init { .. } => unreachable!(),
                 Command::Completions { .. } => unreachable!(),
             }
@@ -1020,50 +1021,78 @@ struct GitHealth {
     dirty: bool,
     upstream: Option<String>,
     ahead: Option<u64>,
+    behind: Option<u64>,
 }
 
 fn git_health(root: &Path) -> Result<GitHealth> {
-    if !root.join(".git").exists() {
+    let repository = git_output(root, &["rev-parse", "--show-toplevel"])?;
+    let repository_root = repository.status.success().then(|| {
+        PathBuf::from(
+            String::from_utf8_lossy(&repository.stdout)
+                .trim()
+                .to_string(),
+        )
+    });
+    let root_is_repository = repository_root
+        .as_deref()
+        .and_then(|path| fs::canonicalize(path).ok())
+        .zip(fs::canonicalize(root).ok())
+        .is_some_and(|(repository, configured)| repository == configured);
+    if !root_is_repository {
         return Ok(GitHealth {
             repository: false,
             dirty: false,
             upstream: None,
             ahead: None,
+            behind: None,
         });
     }
-    let run = |args: &[&str]| -> Result<std::process::Output> {
-        std::process::Command::new("git")
-            .args(args)
-            .current_dir(root)
-            .output()
-            .with_context(|| "run git")
-    };
-    let status = run(&["status", "--porcelain"])?;
+    let status = git_output(root, &["status", "--porcelain"])?;
     if !status.status.success() {
         bail!("could not inspect Git status in {}", root.display());
     }
-    let upstream_output = run(&["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])?;
+    let upstream_output = git_output(
+        root,
+        &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+    )?;
     let upstream = upstream_output.status.success().then(|| {
         String::from_utf8_lossy(&upstream_output.stdout)
             .trim()
             .to_string()
     });
-    let ahead = if upstream.is_some() {
-        let output = run(&["rev-list", "--count", "@{u}..HEAD"])?;
-        output
-            .status
-            .success()
-            .then(|| String::from_utf8_lossy(&output.stdout).trim().parse())
-            .transpose()?
+    let (ahead, behind) = if upstream.is_some() {
+        let output = git_output(
+            root,
+            &["rev-list", "--left-right", "--count", "HEAD...@{u}"],
+        )?;
+        if output.status.success() {
+            let counts = String::from_utf8_lossy(&output.stdout);
+            let mut counts = counts.split_whitespace();
+            (
+                counts.next().map(str::parse).transpose()?,
+                counts.next().map(str::parse).transpose()?,
+            )
+        } else {
+            (None, None)
+        }
     } else {
-        None
+        (None, None)
     };
     Ok(GitHealth {
         repository: true,
         dirty: !status.stdout.is_empty(),
         upstream,
         ahead,
+        behind,
     })
+}
+
+fn git_output(root: &Path, args: &[&str]) -> Result<std::process::Output> {
+    std::process::Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .output()
+        .with_context(|| format!("run `git {}` in {}", args.join(" "), root.display()))
 }
 
 fn print_git_health(git: &GitHealth) {
@@ -1084,11 +1113,15 @@ fn print_git_health(git: &GitHealth) {
             style("✓ clean").green()
         }
     );
-    match (&git.upstream, git.ahead) {
-        (Some(upstream), Some(ahead)) => println!(
-            "{} upstream {upstream}; {ahead} commits ahead",
-            style("✓").green()
-        ),
+    match (&git.upstream, git.ahead, git.behind) {
+        (Some(upstream), Some(ahead), Some(behind)) => {
+            let marker = if ahead == 0 && behind == 0 {
+                style("✓").green()
+            } else {
+                style("⚠").yellow()
+            };
+            println!("{marker} upstream {upstream}; {ahead} ahead, {behind} behind");
+        }
         _ => println!("{} no upstream configured", style("⚠").yellow()),
     }
 }
@@ -2631,6 +2664,171 @@ fn restore_command(config: &Config, dry_run: bool) -> Result<u8> {
         },
         dry_run,
     )
+}
+
+fn sync_command(config: &Config, check: bool, dry_run: bool) -> Result<u8> {
+    if check && dry_run {
+        bail!("--check is already read-only and cannot be combined with --dry-run");
+    }
+    if JSON_OUTPUT.load(Ordering::Relaxed) && !check {
+        bail!("--json requires `si sync --check`");
+    }
+
+    let initial = git_health(&config.root)?;
+    if !initial.repository {
+        bail!(
+            "canonical root is not a Git repository: {}",
+            config.root.display()
+        );
+    }
+    if initial.upstream.is_none() {
+        return render_sync_check(config, initial, false);
+    }
+    if dry_run {
+        println!("{}", Style::new().bold().apply_to("SYNC PLAN"));
+        println!(
+            "FETCH    {}",
+            initial.upstream.as_deref().unwrap_or("upstream")
+        );
+        println!("PULL     fast-forward only");
+        println!("RELINK   canonical skills into every enabled target");
+        println!("Dry run; no files changed and no remote refs fetched.");
+        return Ok(if sync_is_current(config, &initial)? {
+            EXIT_OK
+        } else {
+            EXIT_ISSUES
+        });
+    }
+
+    run_git_checked(&config.root, &["fetch", "--quiet"], "fetch upstream")?;
+    let fetched = git_health(&config.root)?;
+    if check {
+        return render_sync_check(config, fetched, true);
+    }
+    if fetched.dirty {
+        bail!("canonical repository has uncommitted changes; commit or stash them before syncing");
+    }
+    let ahead = fetched.ahead.unwrap_or(0);
+    let behind = fetched.behind.unwrap_or(0);
+    if ahead > 0 && behind > 0 {
+        bail!(
+            "canonical repository has diverged ({ahead} ahead, {behind} behind); reconcile it with Git before syncing"
+        );
+    }
+
+    println!("{}", Style::new().bold().apply_to("SYNC PLAN"));
+    if behind > 0 {
+        println!("PULL     {behind} commit(s), fast-forward only");
+    } else {
+        println!("PULL     already at the fetched remote revision");
+    }
+    println!("RELINK   canonical skills into every enabled target");
+    require_confirmation_with_default("Apply this sync?", true)?;
+
+    if behind > 0 {
+        run_git_checked(
+            &config.root,
+            &["pull", "--ff-only", "--quiet"],
+            "fast-forward canonical repository",
+        )?;
+        println!("{} Canonical repository updated", style("✓").green());
+    } else {
+        println!(
+            "{} Canonical repository already current",
+            style("✓").green()
+        );
+    }
+
+    ASSUME_YES.store(true, Ordering::Relaxed);
+    let link_code = restore_command(config, false)?;
+    let final_health = git_health(&config.root)?;
+    if final_health.ahead.unwrap_or(0) > 0 {
+        println!(
+            "{} Local canonical commits have not been pushed; run `git push` in {}",
+            style("⚠").yellow(),
+            config.root.display()
+        );
+        return Ok(link_code.max(EXIT_ISSUES));
+    }
+    println!("{} This computer is in sync.", style("✓").green());
+    Ok(link_code)
+}
+
+fn run_git_checked(root: &Path, args: &[&str], action: &str) -> Result<()> {
+    let output = git_output(root, args)?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let detail = String::from_utf8_lossy(&output.stderr);
+    bail!("{action} failed: {}", detail.trim());
+}
+
+fn sync_is_current(config: &Config, git: &GitHealth) -> Result<bool> {
+    Ok(git.repository
+        && !git.dirty
+        && git.upstream.is_some()
+        && git.ahead == Some(0)
+        && git.behind == Some(0)
+        && result_exit(&scan(config)?) == EXIT_OK)
+}
+
+fn render_sync_check(config: &Config, git: GitHealth, fetched: bool) -> Result<u8> {
+    let scan = scan(config)?;
+    let links_healthy = result_exit(&scan) == EXIT_OK;
+    let mut reasons = Vec::new();
+    if !git.repository {
+        reasons.push("canonical root is not a Git repository".to_string());
+    }
+    if git.dirty {
+        reasons.push("canonical repository has uncommitted changes".to_string());
+    }
+    if git.upstream.is_none() {
+        reasons.push("canonical repository has no upstream".to_string());
+    }
+    if let Some(ahead) = git.ahead.filter(|count| *count > 0) {
+        reasons.push(format!("{ahead} local commit(s) have not been pushed"));
+    }
+    if let Some(behind) = git.behind.filter(|count| *count > 0) {
+        reasons.push(format!("{behind} remote commit(s) have not been pulled"));
+    }
+    if !links_healthy {
+        reasons.push("one or more agent links need repair".to_string());
+    }
+    let synced = reasons.is_empty();
+
+    if JSON_OUTPUT.load(Ordering::Relaxed) {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "synced": synced,
+                "fetched": fetched,
+                "git": git,
+                "links_healthy": links_healthy,
+                "reasons": reasons,
+            }))?
+        );
+    } else {
+        println!("{}", Style::new().bold().apply_to("Sync status"));
+        print_git_health(&git);
+        println!(
+            "{} agent links",
+            if links_healthy {
+                style("✓ healthy").green()
+            } else {
+                style("⚠ need repair").yellow()
+            }
+        );
+        if synced {
+            println!("\n{} This computer is in sync.", style("✓").green());
+        } else {
+            println!("\n{}", Style::new().bold().apply_to("Out of sync"));
+            for reason in &reasons {
+                println!("{} {reason}", style("⚠").yellow());
+            }
+            println!("Run: si sync");
+        }
+    }
+    Ok(if synced { EXIT_OK } else { EXIT_ISSUES })
 }
 
 fn canonical_skill_names(root: &Path) -> Result<Vec<String>> {

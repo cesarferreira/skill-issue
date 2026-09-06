@@ -83,6 +83,12 @@ pub enum Command {
     },
     /// Link every canonical skill into every configured target.
     Restore,
+    /// Pull the canonical Git repository and repair agent links.
+    Sync {
+        /// Fetch and report Git/link drift without changing skills or links.
+        #[arg(long)]
+        check: bool,
+    },
     /// Generate shell completion definitions.
     Completions { shell: Shell },
 }
