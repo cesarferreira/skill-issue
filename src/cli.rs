@@ -52,47 +52,18 @@ pub enum Command {
         #[arg(long, value_name = "PATH", num_args = 0..=1, default_missing_value = ".")]
         project: Option<PathBuf>,
     },
-    /// Configure the canonical skill directory.
-    Init { root: Option<PathBuf> },
     /// Set up one canonical skill directory and link every detected agent.
     Setup { root: Option<PathBuf> },
-    /// Scan configured skill locations without changing them.
-    Scan {
-        /// Include project-local .claude and .agents skills.
-        #[arg(long, value_name = "PATH", num_args = 0..=1, default_missing_value = ".")]
-        project: Option<PathBuf>,
-    },
-    /// Move skills into the canonical root and replace copies with links.
-    Adopt { skill: Option<String> },
     /// Reconcile canonical skills into configured agent directories.
     Apply,
     /// Show the current health summary.
-    Status {
-        /// Include canonical-root Git health.
-        #[arg(long)]
-        git: bool,
-    },
-    /// Diagnose and optionally repair unambiguous issues.
-    Doctor {
-        #[arg(long)]
-        fix: bool,
-    },
+    Status,
     /// Compare the distinct copies of a skill.
     Diff {
         skill: String,
         #[arg(long)]
         content: bool,
     },
-    /// Expose canonical skills to configured targets.
-    Link(LinkArgs),
-    /// Remove managed links without removing canonical skills.
-    Unlink(UnlinkArgs),
-    /// Hide a canonical skill from every configured agent.
-    Disable { skill: String },
-    /// Expose a canonical skill to every configured agent.
-    Enable { skill: String },
-    /// Permanently delete a canonical skill and every link to it.
-    Delete { skill: String },
     /// List or edit target directories.
     Targets {
         #[command(subcommand)]
@@ -102,14 +73,6 @@ pub enum Command {
     Config {
         #[command(subcommand)]
         command: Option<ConfigCommand>,
-    },
-    /// Link every canonical skill into every configured target.
-    Restore,
-    /// Pull the canonical Git repository and repair agent links.
-    Sync {
-        /// Fetch and report Git/link drift without changing skills or links.
-        #[arg(long)]
-        check: bool,
     },
     /// Generate shell completion definitions.
     Completions { shell: Shell },

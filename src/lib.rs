@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use anyhow::{Context, Result, anyhow, bail};
 use blake3::Hasher;
 use clap_complete::generate;
@@ -94,7 +96,6 @@ pub fn run(cli: Cli) -> Result<u8> {
     JSON_OUTPUT.store(cli.json, Ordering::Relaxed);
     ASSUME_YES.store(cli.yes, Ordering::Relaxed);
     match cli.command {
-        Some(Command::Init { root }) => init(root, cli.dry_run),
         Some(Command::Setup { root }) => setup_command(root, cli.dry_run),
         Some(Command::Completions { shell }) => {
             let mut command = cli::command();
@@ -108,7 +109,7 @@ pub fn run(cli: Cli) -> Result<u8> {
                     eprintln!(
                         "{} skill-issue is not configured. Run {}.",
                         theme::warn_err(),
-                        theme::hint_err("si init")
+                        theme::hint_err("si setup ~/code/skills")
                     );
                     return Ok(EXIT_CONFIG);
                 }
@@ -123,33 +124,16 @@ pub fn run(cli: Cli) -> Result<u8> {
             }
             match command {
                 Command::Tui { project } => tui::run(config, project, cli.dry_run, cli.no_color),
-                Command::Scan { project } => scan_command(&config, project.as_deref()),
-                Command::Adopt { skill } => {
-                    adopt_command(&config, skill.as_deref(), cli.dry_run, true)
-                }
                 Command::Apply => apply::run(&config, cli.dry_run),
-                Command::Status { git } => status_command(&config, git),
-                Command::Doctor { fix } => doctor_command(&config, fix, cli.dry_run),
+                Command::Status => status_command(&config, true),
                 Command::Diff { skill, content } => diff_command(&config, &skill, content),
-                Command::Link(args) => link_command(&config, args, cli.dry_run),
-                Command::Unlink(args) => unlink_command(&config, args, cli.dry_run),
-                Command::Disable { skill } => {
-                    toggle_skill_command(&config, &skill, false, cli.dry_run)
-                }
-                Command::Enable { skill } => {
-                    toggle_skill_command(&config, &skill, true, cli.dry_run)
-                }
-                Command::Delete { skill } => delete_skill_command(&config, &skill, cli.dry_run),
                 Command::Targets { command } => targets_command(config, command, cli.dry_run),
                 Command::Config { command } => config_command(config, command, cli.dry_run),
-                Command::Restore => restore_command(&config, cli.dry_run),
-                Command::Sync { check } => sync_command(&config, check, cli.dry_run),
-                Command::Init { .. } => unreachable!(),
-                Command::Setup { .. } => unreachable!(),
                 Command::Completions { .. } => unreachable!(),
+                Command::Setup { .. } => unreachable!(),
             }
         }
-        None => default_command(cli.dry_run),
+        None => default_command(),
     }
 }
 
@@ -1110,11 +1094,7 @@ fn status_command(config: &Config, include_git: bool) -> Result<u8> {
                 theme::warn_count(canonical - count)
             );
         }
-        if coverage.values().any(|count| *count < canonical) {
-            println!("Run: {}", theme::hint("si link --all"));
-        } else {
-            println!("Run: {}", theme::hint("si doctor"));
-        }
+        println!("Run: {}", theme::hint("si apply"));
     }
     if let Some(git) = git {
         print_git_health(&git);
@@ -1267,14 +1247,14 @@ fn kind_label(kind: &InstallationKind) -> &'static str {
     }
 }
 
-fn default_command(dry_run: bool) -> Result<u8> {
+fn default_command() -> Result<u8> {
     let config = match Config::load() {
         Ok(config) => config,
         Err(error) if is_missing_config(&error) => {
             eprintln!(
                 "{} skill-issue is not configured. Run {}.",
                 theme::warn_err(),
-                theme::hint_err("si init")
+                theme::hint_err("si setup ~/code/skills")
             );
             return Ok(EXIT_CONFIG);
         }
@@ -1284,21 +1264,7 @@ fn default_command(dry_run: bool) -> Result<u8> {
         }
     };
     validate_config(&config)?;
-    let result = scan(&config)?;
-    if JSON_OUTPUT.load(Ordering::Relaxed) {
-        return status_command(&config, false);
-    }
-    if result_exit(&result) == EXIT_OK {
-        return status_command(&config, false);
-    }
-    if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
-        return status_command(&config, false);
-    }
-    println!(
-        "{}\n",
-        theme::banner("Found skill issues. Preparing a safe migration plan...")
-    );
-    adopt_from_scan(&config, &result, None, dry_run, true)
+    status_command(&config, true)
 }
 
 fn adopt_command(
@@ -3599,7 +3565,6 @@ fn config_command(mut config: Config, command: Option<ConfigCommand>, dry_run: b
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::Parser;
     use std::fs;
 
     fn fixture() -> (tempfile::TempDir, Config) {
@@ -4009,23 +3974,5 @@ mod tests {
         verify_link(&claude, &canonical).unwrap();
         assert!(codex.is_dir());
         assert!(canonical.is_dir());
-    }
-
-    #[test]
-    fn clap_accepts_the_documented_link_forms() {
-        cli::command().debug_assert();
-        let direct = Cli::try_parse_from(["si", "link", "foo", "claude", "codex"]).unwrap();
-        assert!(matches!(
-            direct.command,
-            Some(Command::Link(LinkArgs { all: false, .. }))
-        ));
-        let all = Cli::try_parse_from(["si", "link", "--all", "--target", "claude"]).unwrap();
-        assert!(matches!(
-            all.command,
-            Some(Command::Link(LinkArgs { all: true, .. }))
-        ));
-        Cli::try_parse_from(["si", "link", "foo", "--all"]).unwrap();
-        let unlink = Cli::try_parse_from(["si", "unlink", "foo", "--target", "gemini"]).unwrap();
-        assert!(matches!(unlink.command, Some(Command::Unlink(_))));
     }
 }
