@@ -7,7 +7,6 @@
     <img alt="License" src="https://img.shields.io/badge/license-MIT-green">
     <img alt="Rust" src="https://img.shields.io/badge/rust-1.85%2B-orange">
     <img alt="Edition" src="https://img.shields.io/badge/edition-2024-blue">
-    <a href="https://crates.io/crates/skillissue"><img alt="crates.io" src="https://img.shields.io/crates/v/skillissue.svg"></a>
   </p>
 
   <p>
@@ -23,8 +22,10 @@
 
 Requires [Rust](https://rustup.rs) **1.85+** and `~/.cargo/bin` on your `PATH`.
 
+Download a binary from the [latest GitHub release](https://github.com/cesarferreira/skill-issue/releases/latest), or install directly from source:
+
 ```bash
-cargo install skillissue
+cargo install --git https://github.com/cesarferreira/skill-issue.git --locked
 ```
 
 Verify:

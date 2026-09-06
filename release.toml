@@ -1,6 +1,6 @@
 sign-commit = false
 sign-tag = false
-publish = true
+publish = false
 push = true
 tag-name = "v{{version}}"
 
