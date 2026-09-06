@@ -2,7 +2,7 @@ use clap::Parser;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
-    match skillissue::run(skillissue::Cli::parse()) {
+    match skill_issue::run(skill_issue::Cli::parse()) {
         Ok(code) => ExitCode::from(code),
         Err(error) => {
             eprintln!("Error: {error:#}");

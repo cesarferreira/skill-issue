@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "skillissue",
+    name = "si",
     version,
     about = "Deduplicate agent skills with safe canonical symlinks"
 )]

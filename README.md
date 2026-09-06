@@ -31,7 +31,7 @@ cargo install --git https://github.com/cesarferreira/skill-issue.git --locked
 Verify:
 
 ```bash
-skillissue --help
+si --help
 ```
 
 <details>
@@ -55,7 +55,7 @@ Run without installing:
 
 ```bash
 make build-release
-./target/release/skillissue
+./target/release/si
 ```
 
 </details>
@@ -65,19 +65,19 @@ make build-release
 
 ```bash
 # Choose the directory that will hold the real copies.
-skillissue init ~/code/skills
+si init ~/code/skills
 
 # Inspect skills found in Claude Code, Codex, Gemini, and .agents.
-skillissue scan
+si scan
 
 # Preview the exact migration without changing anything.
-skillissue adopt --dry-run
+si adopt --dry-run
 
 # Run the guided migration. Destructive confirmations default to No.
-skillissue
+si
 
 # Verify every canonical skill and symlink.
-skillissue doctor
+si doctor
 ```
 
 `skillissue` compares directory contents rather than timestamps. Identical
@@ -89,11 +89,11 @@ name.
 Common follow-up operations:
 
 ```bash
-skillissue diff rust-cli --content
-skillissue targets add opencode ~/.config/opencode/skills
-skillissue link rust-cli claude codex
-skillissue link --all --target gemini
-skillissue unlink rust-cli codex
+si diff rust-cli --content
+si targets add opencode ~/.config/opencode/skills
+si link rust-cli claude codex
+si link --all --target gemini
+si unlink rust-cli codex
 ```
 
 Every mutating command supports `--dry-run`. Colour is disabled by `NO_COLOR`

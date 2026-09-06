@@ -50,7 +50,7 @@ run:
 # Quick demo
 demo: install
 	@echo "=== skillissue demo ==="
-	skillissue --help
+	si --help
 
 # Bump version, regenerate CHANGELOG.md, tag, publish, and push (requires cargo-release + git-cliff)
 release:

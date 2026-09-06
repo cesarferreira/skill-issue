@@ -48,14 +48,14 @@ jobs:
       - name: Package
         run: |
           cd target/${{ matrix.target }}/release
-          tar czf ../../../skillissue-${{ matrix.target }}.tar.gz skillissue
+          tar czf ../../../skill-issue-${{ matrix.target }}.tar.gz si
           cd ../../..
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
-          name: skillissue-${{ matrix.target }}
-          path: skillissue-${{ matrix.target }}.*
+          name: skill-issue-${{ matrix.target }}
+          path: skill-issue-${{ matrix.target }}.*
 
   release:
     name: Release

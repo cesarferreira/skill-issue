@@ -59,7 +59,7 @@ pub fn run(cli: Cli) -> Result<u8> {
             let config = match Config::load() {
                 Ok(config) => config,
                 Err(error) if is_missing_config(&error) => {
-                    eprintln!("skillissue is not configured. Run `skillissue init`. ");
+                    eprintln!("skillissue is not configured. Run `si init`. ");
                     return Ok(EXIT_CONFIG);
                 }
                 Err(error) => {
@@ -252,7 +252,7 @@ fn init(root: Option<PathBuf>, dry_run: bool) -> Result<u8> {
             return Ok(EXIT_OK);
         }
         bail!(
-            "configuration already exists at {}; use `skillissue config set-root`",
+            "configuration already exists at {}; use `si config set-root`",
             config_path.display()
         );
     }
@@ -704,7 +704,7 @@ fn status_command(config: &Config) -> Result<u8> {
                 );
             }
         }
-        println!("Run: skillissue doctor");
+        println!("Run: si doctor");
     }
     Ok(code)
 }
@@ -721,7 +721,7 @@ fn default_command(dry_run: bool) -> Result<u8> {
     let config = match Config::load() {
         Ok(config) => config,
         Err(error) if is_missing_config(&error) => {
-            eprintln!("skillissue is not configured. Run `skillissue init`. ");
+            eprintln!("skillissue is not configured. Run `si init`. ");
             return Ok(EXIT_CONFIG);
         }
         Err(error) => {
@@ -1360,7 +1360,7 @@ fn doctor_command(config: &Config, fix: bool, dry_run: bool) -> Result<u8> {
     }
     println!("{} {issue_count} issues found", style("⚠").yellow());
     if !fix {
-        println!("Run: skillissue doctor --fix");
+        println!("Run: si doctor --fix");
         return Ok(result_exit(&result).max(EXIT_ISSUES));
     }
 
@@ -2109,13 +2109,12 @@ mod tests {
 
     #[test]
     fn clap_accepts_the_documented_link_forms() {
-        let direct = Cli::try_parse_from(["skillissue", "link", "foo", "claude", "codex"]).unwrap();
+        let direct = Cli::try_parse_from(["si", "link", "foo", "claude", "codex"]).unwrap();
         assert!(matches!(
             direct.command,
             Some(Command::Link(LinkArgs { all: false, .. }))
         ));
-        let all =
-            Cli::try_parse_from(["skillissue", "link", "--all", "--target", "claude"]).unwrap();
+        let all = Cli::try_parse_from(["si", "link", "--all", "--target", "claude"]).unwrap();
         assert!(matches!(
             all.command,
             Some(Command::Link(LinkArgs { all: true, .. }))
