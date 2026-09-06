@@ -19,6 +19,56 @@ fn skill(path: &Path, body: &str) {
     fs::write(path.join("SKILL.md"), body).unwrap();
 }
 
+fn git(path: &Path, args: &[&str]) {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(path)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("HOME", path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {} failed: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn git_sync_fixture() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+    let temp = tempfile::tempdir().unwrap();
+    let remote = temp.path().join("remote.git");
+    let writer = temp.path().join("writer");
+    let machine = temp.path().join("machine");
+    fs::create_dir_all(&remote).unwrap();
+    git(&remote, &["init", "--bare", "-q"]);
+    git(&remote, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+    git(
+        temp.path(),
+        &["clone", "-q", remote.to_str().unwrap(), "writer"],
+    );
+    skill(&writer.join("foo"), "first");
+    git(&writer, &["add", "."]);
+    git(
+        &writer,
+        &[
+            "-c",
+            "user.name=Skill Issue Tests",
+            "-c",
+            "user.email=tests@example.com",
+            "commit",
+            "-qm",
+            "initial",
+        ],
+    );
+    git(&writer, &["push", "-qu", "origin", "HEAD:main"]);
+    git(
+        temp.path(),
+        &["clone", "-q", remote.to_str().unwrap(), "machine"],
+    );
+    (temp, writer, machine)
+}
+
 #[test]
 fn help_lists_the_v01_commands() {
     cargo_bin_cmd!("si")
@@ -30,6 +80,7 @@ fn help_lists_the_v01_commands() {
         .stdout(predicate::str::contains("doctor"))
         .stdout(predicate::str::contains("disable"))
         .stdout(predicate::str::contains("enable"))
+        .stdout(predicate::str::contains("sync"))
         .stdout(predicate::str::contains("targets"));
 }
 
@@ -422,6 +473,299 @@ fn status_git_json_reports_repository_health() {
         .assert()
         .success()
         .stdout(predicate::str::contains("\"repository\": true"));
+}
+
+#[cfg(unix)]
+#[test]
+fn sync_pulls_remote_skills_and_repairs_all_links() {
+    let (temp, writer, machine) = git_sync_fixture();
+    skill(&writer.join("bar"), "second");
+    git(&writer, &["add", "."]);
+    git(
+        &writer,
+        &[
+            "-c",
+            "user.name=Skill Issue Tests",
+            "-c",
+            "user.email=tests@example.com",
+            "commit",
+            "-qm",
+            "add bar",
+        ],
+    );
+    git(&writer, &["push", "-q"]);
+
+    let target = temp.path().join("agent");
+    fs::create_dir_all(&target).unwrap();
+    let config = temp.path().join("config.toml");
+    write_config(&config, &machine, &[("agent", &target)]);
+
+    cargo_bin_cmd!("si")
+        .env("SKILLISSUE_CONFIG", &config)
+        .args(["sync", "--check", "--no-color"])
+        .assert()
+        .code(2)
+        .stdout(predicate::str::contains(
+            "remote commit(s) have not been pulled",
+        ));
+
+    cargo_bin_cmd!("si")
+        .env("SKILLISSUE_CONFIG", &config)
+        .args(["sync", "--yes", "--no-color"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Canonical repository updated"))
+        .stdout(predicate::str::contains("This computer is in sync"));
+    assert!(machine.join("bar").is_dir());
+    assert!(target.join("foo").is_symlink());
+    assert!(target.join("bar").is_symlink());
+
+    cargo_bin_cmd!("si")
+        .env("SKILLISSUE_CONFIG", config)
+        .args(["sync", "--check", "--no-color"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("This computer is in sync"));
+}
+
+#[test]
+fn sync_check_json_explains_local_link_drift() {
+    let (temp, _writer, machine) = git_sync_fixture();
+    let target = temp.path().join("agent");
+    fs::create_dir_all(&target).unwrap();
+    let config = temp.path().join("config.toml");
+    write_config(&config, &machine, &[("agent", &target)]);
+    cargo_bin_cmd!("si")
+        .env("SKILLISSUE_CONFIG", config)
+        .args(["sync", "--check", "--json"])
+        .assert()
+        .code(2)
+        .stdout(predicate::str::contains("\"synced\": false"))
+        .stdout(predicate::str::contains("\"links_healthy\": false"))
+        .stdout(predicate::str::contains(
+            "one or more agent links need repair",
+        ));
+}
+
+#[test]
+fn sync_refuses_non_git_canonical_roots() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("root");
+    fs::create_dir_all(&root).unwrap();
+    let config = temp.path().join("config.toml");
+    write_config(&config, &root, &[]);
+    cargo_bin_cmd!("si")
+        .env("SKILLISSUE_CONFIG", config)
+        .args(["sync", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not a Git repository"));
+}
+
+#[test]
+fn sync_refuses_a_canonical_directory_nested_inside_another_repository() {
+    let temp = tempfile::tempdir().unwrap();
+    git(temp.path(), &["init", "-q"]);
+    let root = temp.path().join("skills");
+    fs::create_dir_all(&root).unwrap();
+    let config = temp.path().join("config.toml");
+    write_config(&config, &root, &[]);
+    cargo_bin_cmd!("si")
+        .env("SKILLISSUE_CONFIG", config)
+        .args(["sync", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not a Git repository"));
+}
+
+#[test]
+fn sync_refuses_dirty_repositories_before_pulling_or_linking() {
+    let (temp, _writer, machine) = git_sync_fixture();
+    fs::write(machine.join("foo/SKILL.md"), "local edit").unwrap();
+    let target = temp.path().join("agent");
+    fs::create_dir_all(&target).unwrap();
+    let config = temp.path().join("config.toml");
+    write_config(&config, &machine, &[("agent", &target)]);
+    cargo_bin_cmd!("si")
+        .env("SKILLISSUE_CONFIG", config)
+        .args(["sync", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("uncommitted changes"));
+    assert!(!target.join("foo").exists());
+}
+
+#[test]
+fn sync_check_reports_a_missing_upstream() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("root");
+    fs::create_dir_all(&root).unwrap();
+    git(&root, &["init", "-q"]);
+    skill(&root.join("foo"), "body");
+    git(&root, &["add", "."]);
+    git(
+        &root,
+        &[
+            "-c",
+            "user.name=Skill Issue Tests",
+            "-c",
+            "user.email=tests@example.com",
+            "commit",
+            "-qm",
+            "initial",
+        ],
+    );
+    let config = temp.path().join("config.toml");
+    write_config(&config, &root, &[]);
+    cargo_bin_cmd!("si")
+        .env("SKILLISSUE_CONFIG", config)
+        .args(["sync", "--check", "--no-color"])
+        .assert()
+        .code(2)
+        .stdout(predicate::str::contains("no upstream"));
+}
+
+#[test]
+fn sync_reports_local_commits_that_still_need_pushing() {
+    let (temp, _writer, machine) = git_sync_fixture();
+    fs::write(machine.join("foo/SKILL.md"), "local commit").unwrap();
+    git(&machine, &["add", "."]);
+    git(
+        &machine,
+        &[
+            "-c",
+            "user.name=Skill Issue Tests",
+            "-c",
+            "user.email=tests@example.com",
+            "commit",
+            "-qm",
+            "local",
+        ],
+    );
+    let target = temp.path().join("agent");
+    fs::create_dir_all(&target).unwrap();
+    let config = temp.path().join("config.toml");
+    write_config(&config, &machine, &[("agent", &target)]);
+    cargo_bin_cmd!("si")
+        .env("SKILLISSUE_CONFIG", config)
+        .args(["sync", "--yes", "--no-color"])
+        .assert()
+        .code(2)
+        .stdout(predicate::str::contains("have not been pushed"));
+    assert!(target.join("foo").is_symlink());
+}
+
+#[test]
+fn sync_refuses_diverged_histories() {
+    let (temp, writer, machine) = git_sync_fixture();
+    skill(&writer.join("remote-only"), "remote");
+    git(&writer, &["add", "."]);
+    git(
+        &writer,
+        &[
+            "-c",
+            "user.name=Skill Issue Tests",
+            "-c",
+            "user.email=tests@example.com",
+            "commit",
+            "-qm",
+            "remote",
+        ],
+    );
+    git(&writer, &["push", "-q"]);
+    skill(&machine.join("local-only"), "local");
+    git(&machine, &["add", "."]);
+    git(
+        &machine,
+        &[
+            "-c",
+            "user.name=Skill Issue Tests",
+            "-c",
+            "user.email=tests@example.com",
+            "commit",
+            "-qm",
+            "local",
+        ],
+    );
+    let target = temp.path().join("agent");
+    fs::create_dir_all(&target).unwrap();
+    let config = temp.path().join("config.toml");
+    write_config(&config, &machine, &[("agent", &target)]);
+    cargo_bin_cmd!("si")
+        .env("SKILLISSUE_CONFIG", config)
+        .args(["sync", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("has diverged"));
+    assert!(!machine.join("remote-only").exists());
+    assert!(!target.join("foo").exists());
+}
+
+#[test]
+fn sync_check_reports_fetch_failures_without_touching_links() {
+    let (temp, _writer, machine) = git_sync_fixture();
+    fs::rename(
+        temp.path().join("remote.git"),
+        temp.path().join("offline.git"),
+    )
+    .unwrap();
+    let target = temp.path().join("agent");
+    fs::create_dir_all(&target).unwrap();
+    let config = temp.path().join("config.toml");
+    write_config(&config, &machine, &[("agent", &target)]);
+    cargo_bin_cmd!("si")
+        .env("SKILLISSUE_CONFIG", config)
+        .args(["sync", "--check"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("fetch upstream failed"));
+    assert!(!target.join("foo").exists());
+}
+
+#[test]
+fn sync_dry_run_does_not_fetch_pull_or_link() {
+    let (temp, writer, machine) = git_sync_fixture();
+    skill(&writer.join("bar"), "second");
+    git(&writer, &["add", "."]);
+    git(
+        &writer,
+        &[
+            "-c",
+            "user.name=Skill Issue Tests",
+            "-c",
+            "user.email=tests@example.com",
+            "commit",
+            "-qm",
+            "add bar",
+        ],
+    );
+    git(&writer, &["push", "-q"]);
+    let before = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(&machine)
+        .output()
+        .unwrap()
+        .stdout;
+    let target = temp.path().join("agent");
+    fs::create_dir_all(&target).unwrap();
+    let config = temp.path().join("config.toml");
+    write_config(&config, &machine, &[("agent", &target)]);
+
+    cargo_bin_cmd!("si")
+        .env("SKILLISSUE_CONFIG", config)
+        .args(["sync", "--dry-run", "--no-color"])
+        .assert()
+        .code(2)
+        .stdout(predicate::str::contains("no remote refs fetched"));
+    let after = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(&machine)
+        .output()
+        .unwrap()
+        .stdout;
+    assert_eq!(before, after);
+    assert!(!machine.join("bar").exists());
+    assert!(!target.join("foo").exists());
 }
 
 #[test]

@@ -142,6 +142,30 @@ si restore --dry-run
 si restore
 ```
 
+## Multiple computers
+
+Keep the canonical skill directory in a Git repository and clone it at the same
+configured root on each computer. Each machine can use different local agent
+targets; `si sync` updates the canonical checkout and repairs the links for that
+machine:
+
+```bash
+# Fetch remote state and report Git or symlink drift without changing skills.
+si sync --check
+
+# Fast-forward the canonical repository, then recreate missing agent links.
+si sync
+```
+
+`si sync --check` exits successfully only when the working tree is clean, the
+branch is neither ahead nor behind its upstream, and all configured agent links
+are healthy. Use `si sync --check --json` in scripts or a status line.
+
+Sync is deliberately conservative: it refuses dirty or diverged repositories,
+pulls with `--ff-only`, never pushes local commits, and never replaces physical
+directories or foreign symlinks. Review the operation without fetching or
+changing anything with `si sync --dry-run`.
+
 Configure portable relative links and exclude generated content from
 fingerprints:
 
