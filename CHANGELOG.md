@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## Unreleased
+
+### 🚀 Features
+
+- Guide adoption skill by skill and report a consolidated migration summary.
+- Preserve rejected divergent versions in a verified, dated migration archive.
+- Link adopted skills into every detected agent and report per-agent coverage.
+- Let `link --all` infer all detected targets and support `unlink --target`.
+- Present compact scan and everyday status output with friendly paths and names.
+
+### 🧪 Testing
+
+- Use cargo-nextest locally and in CI, with end-to-end coverage for the new workflows.
+
 ## [0.2.0] - 2026-09-06
 
 ### 🚀 Features

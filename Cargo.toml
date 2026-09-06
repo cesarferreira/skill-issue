@@ -15,6 +15,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1"
 blake3 = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 console = "0.16"
@@ -35,6 +36,7 @@ xattr = "1"
 
 [dev-dependencies]
 assert_cmd = "2"
+expectrl = "0.9"
 predicates = "3"
 
 [profile.release]

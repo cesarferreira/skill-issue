@@ -18,7 +18,7 @@ mod cli;
 mod model;
 
 pub use cli::Cli;
-use cli::{Command, ConfigCommand, LinkArgs, TargetCommand};
+use cli::{Command, ConfigCommand, LinkArgs, TargetCommand, UnlinkArgs};
 pub use model::{
     CanonicalSkill, Config, Installation, InstallationKind, ScanResult, SkillGroup, SkillStatus,
     TargetConfig,
@@ -40,8 +40,27 @@ struct AdoptionPlan {
     fingerprint: String,
     transfer: CanonicalTransfer,
     replacements: Vec<Replacement>,
+    preserved: Vec<PreservedCopy>,
     ignore: Vec<String>,
     relative_links: bool,
+}
+
+#[derive(Clone, Debug)]
+struct PreservedCopy {
+    source: PathBuf,
+    destination: PathBuf,
+    fingerprint: String,
+    target: String,
+}
+
+#[derive(Default)]
+struct MigrationStats {
+    skills: usize,
+    installations: usize,
+    adopted: usize,
+    skipped: usize,
+    links: usize,
+    preserved: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -94,9 +113,7 @@ pub fn run(cli: Cli) -> Result<u8> {
                 Command::Doctor { fix } => doctor_command(&config, fix, cli.dry_run),
                 Command::Diff { skill, content } => diff_command(&config, &skill, content),
                 Command::Link(args) => link_command(&config, args, cli.dry_run),
-                Command::Unlink { skill, targets } => {
-                    unlink_command(&config, &skill, &targets, cli.dry_run)
-                }
+                Command::Unlink(args) => unlink_command(&config, args, cli.dry_run),
                 Command::Targets { command } => targets_command(config, command, cli.dry_run),
                 Command::Config { command } => config_command(config, command, cli.dry_run),
                 Command::Restore => restore_command(&config, cli.dry_run),
@@ -285,10 +302,19 @@ fn init(root: Option<PathBuf>, dry_run: bool) -> Result<u8> {
     fs::create_dir_all(&root)
         .with_context(|| format!("create canonical root {}", root.display()))?;
     config.save()?;
-    println!("{} Created {}", style("✓").green(), root.display());
-    println!("{} Configuration saved", style("✓").green());
-    for id in config.targets.keys() {
-        println!("{} Detected {id}", style("✓").green());
+    println!(
+        "{} Canonical directory {}",
+        style("✓").green(),
+        display_path(&root)
+    );
+    println!("Detected:");
+    let mut detected: Vec<_> = config.targets.keys().collect();
+    detected.sort_by_key(|id| target_rank(id));
+    for id in detected {
+        println!("  {} {}", style("✓").green(), target_label(id));
+    }
+    if VERBOSITY.load(Ordering::Relaxed) > 0 {
+        println!("{} Configuration saved", style("✓").green());
     }
     Ok(EXIT_OK)
 }
@@ -614,26 +640,44 @@ fn scan_command(config: &Config, project: Option<&Path>) -> Result<u8> {
         );
         return Ok(result_exit(&result));
     }
-    println!("Scanning skill locations...");
-    for (target, count) in &result.target_counts {
-        if VERBOSITY.load(Ordering::Relaxed) > 0 {
-            println!(
-                "  {target:<12} {count:>3}  {}",
-                effective.targets[target].path.display()
-            );
-        } else {
-            println!("  {target:<12} {count:>3}");
-        }
+    println!("Scanning known skill directories...");
+    let mut target_counts: Vec<_> = result.target_counts.iter().collect();
+    target_counts.sort_by_key(|(id, _)| target_rank(id));
+    for (target, count) in target_counts {
+        println!(
+            "  {:<10} {:<38} {:>3}",
+            target_label(target),
+            display_path(&effective.targets[target].path),
+            count
+        );
     }
     for target in &result.missing_targets {
         println!("  {target:<12} {} missing", style("⚠").yellow());
     }
     let installations: usize = result.target_counts.values().sum();
+    let count = |status| {
+        result
+            .groups
+            .values()
+            .filter(|group| group.status() == status)
+            .count()
+    };
+    println!("Found {installations} installations");
+    println!("Found {} unique skills", result.groups.len());
     println!(
-        "\n{installations} installations\n{} unique skills",
-        result.groups.len()
+        "{} {} identical duplicates",
+        style("✓").green(),
+        count(SkillStatus::IdenticalDuplicate)
     );
-    print_groups(&result);
+    println!(
+        "{} {} divergent",
+        style("⚠").yellow(),
+        count(SkillStatus::Divergent)
+    );
+    println!("• {} unique", count(SkillStatus::Unique));
+    if VERBOSITY.load(Ordering::Relaxed) > 0 {
+        print_groups(&result);
+    }
     Ok(result_exit(&result))
 }
 
@@ -737,6 +781,45 @@ fn short_hash(hash: &str) -> &str {
     &hash[..hash.len().min(7)]
 }
 
+fn target_label(id: &str) -> String {
+    match id {
+        "claude" => "Claude".into(),
+        "codex" => "Codex".into(),
+        "gemini" => "Gemini".into(),
+        "agents" => "Agents".into(),
+        _ => {
+            let mut chars = id.chars();
+            chars
+                .next()
+                .map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
+                .unwrap_or_default()
+        }
+    }
+}
+
+fn target_rank(id: &str) -> u8 {
+    match id {
+        "claude" => 0,
+        "codex" => 1,
+        "gemini" => 2,
+        "agents" => 3,
+        _ => 4,
+    }
+}
+
+fn display_path(path: &Path) -> String {
+    if let Some(home) = dirs::home_dir()
+        && let Ok(relative) = path.strip_prefix(home)
+    {
+        return if relative.as_os_str().is_empty() {
+            "~".into()
+        } else {
+            format!("~/{}", relative.display())
+        };
+    }
+    path.display().to_string()
+}
+
 fn result_exit(result: &ScanResult) -> u8 {
     if result
         .groups
@@ -745,6 +828,15 @@ fn result_exit(result: &ScanResult) -> u8 {
     {
         EXIT_CONFLICTS
     } else if !result.missing_targets.is_empty()
+        || result.groups.values().any(|group| {
+            group.canonical.is_some()
+                && result.target_counts.keys().any(|target| {
+                    !group.installations.iter().any(|installation| {
+                        &installation.target == target
+                            && installation.kind == InstallationKind::ManagedSymlink
+                    })
+                })
+        })
         || result
             .groups
             .values()
@@ -770,6 +862,25 @@ fn status_command(config: &Config, include_git: bool) -> Result<u8> {
         .flat_map(|g| &g.installations)
         .filter(|i| i.kind == InstallationKind::ManagedSymlink)
         .count();
+    let coverage: BTreeMap<String, usize> = config
+        .targets
+        .iter()
+        .filter(|(_, target)| target.enabled)
+        .map(|(id, _)| {
+            let count = result
+                .groups
+                .values()
+                .filter(|group| {
+                    group.canonical.is_some()
+                        && group.installations.iter().any(|installation| {
+                            installation.target == *id
+                                && installation.kind == InstallationKind::ManagedSymlink
+                        })
+                })
+                .count();
+            (id.clone(), count)
+        })
+        .collect();
     let recovery = recovery_artifacts(config)?;
     let code = result_exit(&result).max(if recovery.is_empty() {
         EXIT_OK
@@ -798,6 +909,7 @@ fn status_command(config: &Config, include_git: bool) -> Result<u8> {
                 "targets": config.targets.values().filter(|target| target.enabled).count(),
                 "installations": installations,
                 "healthy_symlinks": managed,
+                "coverage": coverage,
                 "healthy": code == EXIT_OK,
                 "recovery_artifacts": recovery,
                 "skills": skills,
@@ -806,12 +918,24 @@ fn status_command(config: &Config, include_git: bool) -> Result<u8> {
         );
         return Ok(code);
     }
-    println!("{}", Style::new().bold().apply_to("Canonical directory"));
-    println!("  {}", config.root.display());
-    println!(
-        "{canonical} skills\n{} targets\n{installations} installations\n{managed} healthy symlinks",
-        config.targets.values().filter(|t| t.enabled).count()
-    );
+    println!("{}", Style::new().bold().apply_to("skillissue"));
+    println!("{}", Style::new().bold().apply_to("Canonical"));
+    println!("  {}", display_path(&config.root));
+    println!("{canonical} skills");
+    println!("{} agents", coverage.len());
+    let mut ordered_coverage: Vec<_> = coverage.iter().collect();
+    ordered_coverage.sort_by_key(|(id, _)| target_rank(id));
+    for (id, count) in ordered_coverage {
+        let mark = if *count == canonical {
+            style("✓").green()
+        } else {
+            style("⚠").yellow()
+        };
+        println!("{mark} {:<10} {count}/{canonical}", target_label(id));
+    }
+    if VERBOSITY.load(Ordering::Relaxed) > 0 {
+        println!("{installations} installations\n{managed} healthy symlinks");
+    }
     if code == EXIT_OK {
         println!("{} No skill issues.", style("✓").green());
     } else {
@@ -849,7 +973,19 @@ fn status_command(config: &Config, include_git: bool) -> Result<u8> {
                 );
             }
         }
-        println!("Run: si doctor");
+        for (id, count) in coverage.iter().filter(|(_, count)| **count < canonical) {
+            println!(
+                "{} {} is missing {} canonical skill links",
+                style("⚠").yellow(),
+                target_label(id),
+                canonical - count
+            );
+        }
+        if coverage.values().any(|count| *count < canonical) {
+            println!("Run: si link --all");
+        } else {
+            println!("Run: si doctor");
+        }
     }
     if let Some(git) = git {
         print_git_health(&git);
@@ -1006,40 +1142,177 @@ fn adopt_from_scan(
     {
         bail!("divergent skills require an interactive terminal; no files were changed");
     }
-    let mut plans = Vec::new();
-    for group in selected {
-        plans.extend(plans_for_group(config, group, tty)?);
+    if !tty && !ASSUME_YES.load(Ordering::Relaxed) && !dry_run {
+        bail!("adoption requires an interactive confirmation; use --dry-run to inspect the plan");
     }
-    if plans.is_empty() {
+    println!(
+        "Canonical skill directory:\n  {}\n",
+        display_path(&config.root)
+    );
+    let mut stats = MigrationStats {
+        skills: selected.len(),
+        installations: result.target_counts.values().sum(),
+        ..MigrationStats::default()
+    };
+    let mut planned_any = false;
+    for group in selected {
+        if matches!(group.status(), SkillStatus::Managed | SkillStatus::Broken) {
+            continue;
+        }
+        print_adoption_group(group);
+        if tty
+            && group.status() != SkillStatus::Divergent
+            && !ASSUME_YES.load(Ordering::Relaxed)
+            && !Confirm::with_theme(&ColorfulTheme::default())
+                .with_prompt("Adopt?")
+                .default(true)
+                .interact()?
+        {
+            stats.skipped += 1;
+            println!("{} skipped\n", style("⚠").yellow());
+            continue;
+        }
+        let mut plans = plans_for_group(config, group, tty)?;
+        if plans.is_empty() {
+            stats.skipped += 1;
+            println!("{} skipped\n", style("⚠").yellow());
+            continue;
+        }
+        if plans.len() == 1 {
+            add_missing_target_links(config, group, &mut plans[0])?;
+        }
+        planned_any = true;
+        if dry_run || VERBOSITY.load(Ordering::Relaxed) > 0 {
+            render_adoption_plans(&plans);
+        } else {
+            render_adoption_summary(&plans);
+        }
+        if dry_run {
+            stats.links += plans
+                .iter()
+                .map(|plan| plan.replacements.len())
+                .sum::<usize>();
+            stats.preserved += plans.iter().map(|plan| plan.preserved.len()).sum::<usize>();
+            println!();
+            continue;
+        }
+        if tty
+            && group.status() == SkillStatus::Divergent
+            && !ASSUME_YES.load(Ordering::Relaxed)
+            && !Confirm::with_theme(&ColorfulTheme::default())
+                .with_prompt("Use this resolution?")
+                .default(false)
+                .interact()?
+        {
+            stats.skipped += 1;
+            println!("{} skipped\n", style("⚠").yellow());
+            continue;
+        }
+        for plan in &plans {
+            execute_adoption(plan)?;
+            stats.links += plan.replacements.len();
+            stats.preserved += plan.preserved.len();
+        }
+        stats.adopted += 1;
+        println!("{} {} adopted\n", style("✓").green(), group.name);
+    }
+    if !planned_any {
+        if stats.skipped > 0 {
+            println!("Done.\n{} skills", stats.skills);
+            println!("{} installations", stats.installations);
+            println!("{} 0 adopted", style("✓").green());
+            println!("{} {} skipped", style("⚠").yellow(), stats.skipped);
+            println!("{} 0 symlinks created", style("✓").green());
+            println!("{} no data lost", style("✓").green());
+            println!("Run:\n  si status");
+            return Ok(result_exit(result));
+        }
         println!("No adoptable skills found.");
         return Ok(result_exit(result));
     }
-    render_adoption_plans(&plans);
     if dry_run {
         println!("Dry run; no files changed.");
         return Ok(result_exit(result));
     }
-    if !tty && !ASSUME_YES.load(Ordering::Relaxed) {
-        bail!("adoption requires an interactive confirmation; use --dry-run to inspect the plan");
-    }
-    if !ASSUME_YES.load(Ordering::Relaxed)
-        && !Confirm::with_theme(&ColorfulTheme::default())
-            .with_prompt("Proceed?")
-            .default(false)
-            .interact()?
-    {
-        println!("Cancelled. No files were changed.");
-        return Ok(result_exit(result));
-    }
-    for plan in &plans {
-        execute_adoption(plan)?;
-        println!("{} {} adopted", style("✓").green(), plan.display_name);
-    }
     let after = scan(config)?;
+    println!("Done.\n{} skills", stats.skills);
+    println!("{} installations", stats.installations);
+    println!("{} {} adopted", style("✓").green(), stats.adopted);
+    if stats.skipped > 0 {
+        println!("{} {} skipped", style("⚠").yellow(), stats.skipped);
+    }
+    println!("{} {} symlinks created", style("✓").green(), stats.links);
+    if stats.preserved > 0 {
+        println!(
+            "{} {} divergent versions preserved",
+            style("✓").green(),
+            stats.preserved
+        );
+    }
+    println!("{} no data lost", style("✓").green());
     if result_exit(&after) == EXIT_OK {
         println!("{} No skill issues.", style("✓").green());
+    } else {
+        println!("Run:\n  si status");
     }
     Ok(result_exit(&after))
+}
+
+fn add_missing_target_links(
+    config: &Config,
+    group: &SkillGroup,
+    plan: &mut AdoptionPlan,
+) -> Result<()> {
+    let installed: BTreeSet<&str> = group
+        .installations
+        .iter()
+        .map(|installation| installation.target.as_str())
+        .collect();
+    for (id, target) in config.targets.iter().filter(|(_, target)| target.enabled) {
+        if installed.contains(id.as_str()) {
+            continue;
+        }
+        let destination = target.path.join(&group.name);
+        if fs::symlink_metadata(&destination).is_ok() {
+            bail!("{} already exists; nothing changed", destination.display());
+        }
+        plan.replacements.push(Replacement {
+            original: destination,
+            backup: None,
+        });
+    }
+    Ok(())
+}
+
+fn print_adoption_group(group: &SkillGroup) {
+    println!("{}", Style::new().bold().apply_to(&group.name));
+    if let Some(canonical) = &group.canonical {
+        println!(
+            "  {:<10} {}",
+            "Canonical",
+            short_hash(&canonical.fingerprint)
+        );
+    }
+    for installation in &group.installations {
+        println!(
+            "  {:<10} {}  {}",
+            target_label(&installation.target),
+            installation
+                .fingerprint
+                .as_deref()
+                .map(short_hash)
+                .unwrap_or("broken"),
+            display_path(&installation.path)
+        );
+    }
+    match group.status() {
+        SkillStatus::IdenticalDuplicate => {
+            println!("{} all copies identical", style("✓").green())
+        }
+        SkillStatus::Unique => println!("• one physical copy"),
+        SkillStatus::Divergent => println!("{} copies differ", style("⚠").yellow()),
+        _ => {}
+    }
 }
 
 fn plans_for_group(config: &Config, group: &SkillGroup, tty: bool) -> Result<Vec<AdoptionPlan>> {
@@ -1072,7 +1345,7 @@ fn plans_for_group(config: &Config, group: &SkillGroup, tty: bool) -> Result<Vec
         let options = [
             "Use the existing canonical version where copies match",
             "Keep all physical versions under separate names",
-            "View content diff",
+            "View diff",
             "Skip",
         ];
         match Select::with_theme(&ColorfulTheme::default())
@@ -1081,15 +1354,14 @@ fn plans_for_group(config: &Config, group: &SkillGroup, tty: bool) -> Result<Vec
             .default(3)
             .interact()?
         {
-            0 => Ok(plan_existing(
-                &group.name,
-                canonical,
+            0 => plan_selected_version(
+                config,
+                group,
+                canonical.fingerprint.clone(),
                 matching,
-                &config.ignore,
-                config.relative_links,
+                Some(canonical),
             )
-            .into_iter()
-            .collect()),
+            .map(|plan| vec![plan]),
             1 => plans_keep_both(config, group, &physical_by_fp, Some(&canonical.fingerprint)),
             2 => {
                 diff_group(group, true, &config.ignore)?;
@@ -1121,7 +1393,7 @@ fn plans_for_group(config: &Config, group: &SkillGroup, tty: bool) -> Result<Vec
                             .installations
                             .iter()
                             .find(|i| i.path == *path)
-                            .map(|i| i.target.as_str())
+                            .map(|i| target_label(&i.target))
                     })
                     .collect::<Vec<_>>()
                     .join(" / ");
@@ -1129,7 +1401,7 @@ fn plans_for_group(config: &Config, group: &SkillGroup, tty: bool) -> Result<Vec
             })
             .collect();
         labels.push("Keep all versions under separate names".to_string());
-        labels.push("View content diff".to_string());
+        labels.push("View diff".to_string());
         labels.push("Skip".to_string());
         let choice = Select::with_theme(&ColorfulTheme::default())
             .with_prompt(format!("{} has divergent copies", group.name))
@@ -1138,12 +1410,12 @@ fn plans_for_group(config: &Config, group: &SkillGroup, tty: bool) -> Result<Vec
             .interact()?;
         if choice < versions.len() {
             let (fingerprint, paths) = versions[choice];
-            Ok(vec![plan_new(
+            Ok(vec![plan_selected_version(
                 config,
-                &group.name,
-                &group.name,
+                group,
                 (*fingerprint).clone(),
                 (*paths).clone(),
+                None,
             )?])
         } else if choice == versions.len() {
             plans_keep_both(config, group, &physical_by_fp, None)
@@ -1173,6 +1445,96 @@ fn physical_versions(group: &SkillGroup) -> BTreeMap<String, Vec<PathBuf>> {
     versions
 }
 
+fn plan_selected_version(
+    config: &Config,
+    group: &SkillGroup,
+    fingerprint: String,
+    matching: Vec<PathBuf>,
+    canonical: Option<&CanonicalSkill>,
+) -> Result<AdoptionPlan> {
+    let archive_root = migration_archive_root()?.join(&group.name);
+    plan_selected_version_at(
+        config,
+        group,
+        fingerprint,
+        matching,
+        canonical,
+        archive_root,
+    )
+}
+
+fn plan_selected_version_at(
+    config: &Config,
+    group: &SkillGroup,
+    fingerprint: String,
+    matching: Vec<PathBuf>,
+    canonical: Option<&CanonicalSkill>,
+    archive_root: PathBuf,
+) -> Result<AdoptionPlan> {
+    let mut plan = if let Some(canonical) = canonical {
+        plan_existing(
+            &group.name,
+            canonical,
+            matching,
+            &config.ignore,
+            config.relative_links,
+        )
+        .unwrap_or_else(|| AdoptionPlan {
+            display_name: group.name.clone(),
+            canonical: canonical.path.clone(),
+            fingerprint: canonical.fingerprint.clone(),
+            transfer: CanonicalTransfer::Existing,
+            replacements: Vec::new(),
+            preserved: Vec::new(),
+            ignore: config.ignore.clone(),
+            relative_links: config.relative_links,
+        })
+    } else {
+        plan_new(
+            config,
+            &group.name,
+            &group.name,
+            fingerprint.clone(),
+            matching,
+        )?
+    };
+    for installation in group.installations.iter().filter(|installation| {
+        installation.kind == InstallationKind::Physical
+            && installation.fingerprint.as_deref() != Some(fingerprint.as_str())
+    }) {
+        let rejected_fingerprint = installation.fingerprint.clone().ok_or_else(|| {
+            anyhow!(
+                "cannot preserve unreadable copy at {}",
+                installation.path.display()
+            )
+        })?;
+        let destination = archive_root.join(&installation.target);
+        plan.preserved.push(PreservedCopy {
+            source: installation.path.clone(),
+            destination,
+            fingerprint: rejected_fingerprint,
+            target: installation.target.clone(),
+        });
+        plan.replacements.push(Replacement {
+            original: installation.path.clone(),
+            backup: Some(unique_sibling(&installation.path, "backup")),
+        });
+    }
+    Ok(plan)
+}
+
+fn migration_archive_root() -> Result<PathBuf> {
+    let base = std::env::var_os("SKILLISSUE_CACHE")
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|home| home.join(".cache")))
+        .ok_or_else(|| anyhow!("could not determine cache directory for migration archive"))?;
+    Ok(base.join("skillissue/migrations").join(
+        chrono::Utc::now()
+            .format("%Y-%m-%dT%H%M%S%.3fZ")
+            .to_string(),
+    ))
+}
+
 fn plan_existing(
     name: &str,
     canonical: &CanonicalSkill,
@@ -1195,6 +1557,7 @@ fn plan_existing(
                 original,
             })
             .collect(),
+        preserved: Vec::new(),
         ignore: ignore.to_vec(),
         relative_links,
     })
@@ -1250,6 +1613,7 @@ fn plan_new(
         fingerprint,
         transfer,
         replacements,
+        preserved: Vec::new(),
         ignore: config.ignore.clone(),
         relative_links: config.relative_links,
     })
@@ -1333,9 +1697,52 @@ fn validate_skill_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+fn render_adoption_summary(plans: &[AdoptionPlan]) {
+    for plan in plans {
+        if !plan.preserved.is_empty() {
+            println!("Preserving:");
+            for preserved in &plan.preserved {
+                println!(
+                    "  {}\n    -> {}",
+                    display_path(&preserved.source),
+                    display_path(&preserved.destination)
+                );
+            }
+        }
+        match &plan.transfer {
+            CanonicalTransfer::Existing => {}
+            CanonicalTransfer::Move { source } => println!(
+                "Moving:\n  {}\n    -> {}",
+                display_path(source),
+                display_path(&plan.canonical)
+            ),
+            CanonicalTransfer::Copy { source, .. } => println!(
+                "Copying:\n  {}\n    -> {}",
+                display_path(source),
+                display_path(&plan.canonical)
+            ),
+        }
+        println!("Linking:");
+        for replacement in &plan.replacements {
+            println!(
+                "  {} -> {}",
+                display_path(&replacement.original),
+                display_path(&plan.canonical)
+            );
+        }
+    }
+}
+
 fn render_adoption_plans(plans: &[AdoptionPlan]) {
     println!("{}", Style::new().bold().apply_to("PLAN"));
     for plan in plans {
+        for preserved in &plan.preserved {
+            println!(
+                "PRESERVE\n  {}\n    -> {}",
+                display_path(&preserved.source),
+                display_path(&preserved.destination)
+            );
+        }
         match &plan.transfer {
             CanonicalTransfer::Existing => {}
             CanonicalTransfer::Move { source } => {
@@ -1387,6 +1794,42 @@ fn render_adoption_plans(plans: &[AdoptionPlan]) {
 }
 
 fn execute_adoption(plan: &AdoptionPlan) -> Result<()> {
+    for preserved in &plan.preserved {
+        let parent = preserved
+            .destination
+            .parent()
+            .ok_or_else(|| anyhow!("invalid migration archive path"))?;
+        fs::create_dir_all(parent)?;
+        if preserved.destination.exists() {
+            bail!(
+                "migration archive already exists: {}",
+                preserved.destination.display()
+            );
+        }
+        if let Err(error) = copy_skill(&preserved.source, &preserved.destination).and_then(|_| {
+            let actual = fingerprint_with_ignores(&preserved.destination, &plan.ignore)?;
+            if actual != preserved.fingerprint {
+                bail!("migration archive verification failed");
+            }
+            let manifest = serde_json::to_vec_pretty(&serde_json::json!({
+                "skill": plan.display_name,
+                "target": preserved.target,
+                "source": preserved.source,
+                "archive": preserved.destination,
+                "fingerprint": preserved.fingerprint,
+                "selected_fingerprint": plan.fingerprint,
+                "created_at": chrono::Utc::now().to_rfc3339(),
+            }))?;
+            fs::write(
+                parent.join(format!("{}.manifest.json", preserved.target)),
+                manifest,
+            )?;
+            Ok(())
+        }) {
+            let _ = fs::remove_dir_all(&preserved.destination);
+            return Err(error).context("preserve divergent skill version");
+        }
+    }
     fs::create_dir_all(
         plan.canonical
             .parent()
@@ -1438,6 +1881,9 @@ fn execute_adoption(plan: &AdoptionPlan) -> Result<()> {
                     .with_context(|| format!("stage {}", replacement.original.display()))?;
                 staged.push((replacement.original.clone(), backup.clone()));
             }
+            if let Some(parent) = replacement.original.parent() {
+                fs::create_dir_all(parent)?;
+            }
             create_managed_symlink(&plan.canonical, &replacement.original, plan.relative_links)?;
             created_links.push(replacement.original.clone());
             verify_link(&replacement.original, &plan.canonical)?;
@@ -1467,6 +1913,14 @@ fn execute_adoption(plan: &AdoptionPlan) -> Result<()> {
                 backup.display()
             );
         }
+    }
+    for preserved in &plan.preserved {
+        println!(
+            "{} preserved {} version at:\n  {}",
+            style("⚠").yellow(),
+            target_label(&preserved.target),
+            display_path(&preserved.destination)
+        );
     }
     Ok(())
 }
@@ -1804,6 +2258,10 @@ fn recovery_artifacts(config: &Config) -> Result<Vec<PathBuf>> {
 }
 
 fn require_confirmation(prompt: &str) -> Result<()> {
+    require_confirmation_with_default(prompt, false)
+}
+
+fn require_confirmation_with_default(prompt: &str, default: bool) -> Result<()> {
     if ASSUME_YES.load(Ordering::Relaxed) {
         return Ok(());
     }
@@ -1812,7 +2270,7 @@ fn require_confirmation(prompt: &str) -> Result<()> {
     }
     if !Confirm::with_theme(&ColorfulTheme::default())
         .with_prompt(prompt)
-        .default(false)
+        .default(default)
         .interact()?
     {
         bail!("cancelled; no files were changed");
@@ -1979,7 +2437,7 @@ fn diff_group(group: &SkillGroup, content: bool, ignore: &[String]) -> Result<u8
             EXIT_CONFLICTS
         });
     }
-    println!("{} ↔ {}", left.0, right.0);
+    println!("{} ↔ {}", target_label(&left.0), target_label(&right.0));
     for change in &changes {
         println!("{} {}", change.status, change.path);
         if let Some(content) = &change.content {
@@ -2010,17 +2468,24 @@ fn content_diff(name: &str, left: &ManifestEntry, right: &ManifestEntry) -> Resu
 }
 
 fn link_command(config: &Config, args: LinkArgs, dry_run: bool) -> Result<u8> {
-    let target_ids = if args.all {
-        args.target
-    } else {
-        let mut targets = args.targets;
-        targets.extend(args.target);
-        targets
-    };
-    if target_ids.is_empty() {
-        bail!("at least one target is required");
+    let all_skills = args.skill.is_none() && args.all;
+    let mut target_ids = args.targets;
+    target_ids.extend(args.target);
+    let inferred_all_targets = target_ids.is_empty() && args.all;
+    if inferred_all_targets {
+        target_ids = config
+            .targets
+            .iter()
+            .filter(|(_, target)| target.enabled)
+            .map(|(id, _)| id.clone())
+            .collect();
     }
-    let skills = if args.all {
+    target_ids.sort_by_key(|id| target_rank(id));
+    target_ids.dedup();
+    if target_ids.is_empty() {
+        bail!("at least one target is required; use --all for every detected target");
+    }
+    let skills = if all_skills {
         canonical_skill_names(&config.root)?
     } else {
         vec![
@@ -2028,10 +2493,11 @@ fn link_command(config: &Config, args: LinkArgs, dry_run: bool) -> Result<u8> {
                 .ok_or_else(|| anyhow!("a skill is required unless --all is used"))?,
         ]
     };
+    let requested_target_count = target_ids.len();
     let mut links = Vec::new();
     let mut create_targets = BTreeSet::new();
-    for target_id in target_ids {
-        let target = enabled_target(config, &target_id)?;
+    for target_id in &target_ids {
+        let target = enabled_target(config, target_id)?;
         if !target.path.exists() {
             create_targets.insert(target.path.clone());
         }
@@ -2067,22 +2533,37 @@ fn link_command(config: &Config, args: LinkArgs, dry_run: bool) -> Result<u8> {
         println!("All requested links already exist.");
         return Ok(EXIT_OK);
     }
-    println!("{}", Style::new().bold().apply_to("PLAN"));
-    for path in &create_targets {
-        println!("CREATE TARGET  {}", path.display());
+    println!("Detected:");
+    for target in &target_ids {
+        println!("  {} {}", style("✓").green(), target_label(target));
     }
-    for (link, target) in &links {
-        println!(
-            "LINK\n  {}\n    -> {}",
-            link.display(),
-            managed_link_value(target, link, config.relative_links).display()
-        );
+    if dry_run || VERBOSITY.load(Ordering::Relaxed) > 0 {
+        println!("{}", Style::new().bold().apply_to("PLAN"));
+        for path in &create_targets {
+            println!("CREATE TARGET  {}", display_path(path));
+        }
+        for (link, target) in &links {
+            println!(
+                "LINK\n  {}\n    -> {}",
+                display_path(link),
+                display_path(&managed_link_value(target, link, config.relative_links))
+            );
+        }
     }
     if dry_run {
         println!("Dry run; no files changed.");
         return Ok(EXIT_OK);
     }
-    require_confirmation("Create these links?")?;
+    let prompt = if inferred_all_targets {
+        format!("Link {} skills into all detected agents?", skills.len())
+    } else {
+        format!(
+            "Link {} skills into {} selected agents?",
+            skills.len(),
+            requested_target_count
+        )
+    };
+    require_confirmation_with_default(&prompt, true)?;
     for path in create_targets {
         fs::create_dir_all(path)?;
     }
@@ -2098,8 +2579,11 @@ fn link_command(config: &Config, args: LinkArgs, dry_run: bool) -> Result<u8> {
         }
         created.push(link.clone());
     }
-    for (link, _) in links {
-        println!("{} {}", style("✓").green(), link.display());
+    let created_count = links.len();
+    println!("{} {created_count} links created", style("✓").green());
+    let after = scan(config)?;
+    if result_exit(&after) == EXIT_OK {
+        println!("{} No skill issues.", style("✓").green());
     }
     Ok(EXIT_OK)
 }
@@ -2149,13 +2633,17 @@ fn enabled_target<'a>(config: &'a Config, id: &str) -> Result<&'a TargetConfig> 
     Ok(target)
 }
 
-fn unlink_command(config: &Config, skill: &str, targets: &[String], dry_run: bool) -> Result<u8> {
+fn unlink_command(config: &Config, args: UnlinkArgs, dry_run: bool) -> Result<u8> {
+    let mut targets = args.targets;
+    targets.extend(args.target);
+    targets.sort();
+    targets.dedup();
     if targets.is_empty() {
         bail!("at least one target is required");
     }
     let mut links = Vec::new();
-    for id in targets {
-        let path = enabled_target(config, id)?.path.join(skill);
+    for id in &targets {
+        let path = enabled_target(config, id)?.path.join(&args.skill);
         let metadata = fs::symlink_metadata(&path)
             .with_context(|| format!("{} does not exist", path.display()))?;
         if !metadata.file_type().is_symlink() {
@@ -2174,7 +2662,7 @@ fn unlink_command(config: &Config, skill: &str, targets: &[String], dry_run: boo
     }
     println!(
         "Canonical skill remains: {}",
-        config.root.join(skill).display()
+        config.root.join(&args.skill).display()
     );
     if dry_run {
         println!("Dry run; no files changed.");
@@ -2641,6 +3129,74 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn selecting_a_divergent_winner_preserves_the_loser_and_manages_every_target() {
+        let (temp, config) = fixture();
+        let claude = config.targets["claude"].path.join("android");
+        let codex = config.targets["codex"].path.join("android");
+        skill(&claude, "winner");
+        skill(&codex, "preserve me");
+        let result = scan(&config).unwrap();
+        let group = &result.groups["android"];
+        let selected = fingerprint(&claude).unwrap();
+        let archive = temp.path().join("archive/android");
+        let plan = plan_selected_version_at(
+            &config,
+            group,
+            selected,
+            vec![claude.clone()],
+            None,
+            archive.clone(),
+        )
+        .unwrap();
+        assert_eq!(plan.preserved.len(), 1);
+        execute_adoption(&plan).unwrap();
+        assert_eq!(
+            fs::read_to_string(archive.join("codex/SKILL.md")).unwrap(),
+            "preserve me"
+        );
+        assert!(archive.join("codex.manifest.json").is_file());
+        assert_eq!(fs::read_link(&claude).unwrap(), config.root.join("android"));
+        assert_eq!(fs::read_link(&codex).unwrap(), config.root.join("android"));
+        assert_eq!(
+            scan(&config).unwrap().groups["android"].status(),
+            SkillStatus::Managed
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_later_skill_failure_does_not_lose_an_earlier_completed_skill() {
+        let (_temp, config) = fixture();
+        let first = config.targets["claude"].path.join("first");
+        let second = config.targets["claude"].path.join("second");
+        skill(&first, "first");
+        skill(&second, "second");
+        let first_plan = plan_new(
+            &config,
+            "first",
+            "first",
+            fingerprint(&first).unwrap(),
+            vec![first.clone()],
+        )
+        .unwrap();
+        execute_adoption(&first_plan).unwrap();
+        let failed_plan = plan_new(
+            &config,
+            "second",
+            "second",
+            fingerprint(&second).unwrap(),
+            vec![second.clone(), config.targets["codex"].path.join("missing")],
+        )
+        .unwrap();
+        assert!(execute_adoption(&failed_plan).is_err());
+        assert!(config.root.join("first").is_dir());
+        assert!(first.is_symlink());
+        assert!(second.is_dir());
+        assert!(!config.root.join("second").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn cross_filesystem_copy_path_preserves_permissions_and_timestamps() {
         use std::os::unix::fs::PermissionsExt;
         let temp = tempfile::tempdir().unwrap();
@@ -2674,5 +3230,8 @@ mod tests {
             all.command,
             Some(Command::Link(LinkArgs { all: true, .. }))
         ));
+        Cli::try_parse_from(["si", "link", "foo", "--all"]).unwrap();
+        let unlink = Cli::try_parse_from(["si", "unlink", "foo", "--target", "gemini"]).unwrap();
+        assert!(matches!(unlink.command, Some(Command::Unlink(_))));
     }
 }

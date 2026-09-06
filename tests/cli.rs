@@ -348,3 +348,147 @@ fn configured_relative_links_are_used_by_link_command() {
         .success();
     assert!(fs::read_link(target.join("foo")).unwrap().is_relative());
 }
+
+#[test]
+fn scan_prints_the_compact_happy_path_summary() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("root");
+    let claude = temp.path().join("claude");
+    let codex = temp.path().join("codex");
+    fs::create_dir_all(&root).unwrap();
+    skill(&claude.join("same"), "same");
+    skill(&codex.join("same"), "same");
+    skill(&claude.join("different"), "one");
+    skill(&codex.join("different"), "two");
+    skill(&claude.join("unique"), "only");
+    let config = temp.path().join("config.toml");
+    write_config(&config, &root, &[("claude", &claude), ("codex", &codex)]);
+    cargo_bin_cmd!("si")
+        .env("SKILLISSUE_CONFIG", config)
+        .args(["scan", "--no-color"])
+        .assert()
+        .code(3)
+        .stdout(predicate::str::contains("Scanning known skill directories"))
+        .stdout(predicate::str::contains("Found 5 installations"))
+        .stdout(predicate::str::contains("Found 3 unique skills"))
+        .stdout(predicate::str::contains("1 identical duplicates"))
+        .stdout(predicate::str::contains("1 divergent"))
+        .stdout(predicate::str::contains("1 unique"));
+}
+
+#[cfg(unix)]
+#[test]
+fn adopt_links_a_skill_into_every_detected_target_and_reports_totals() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("root");
+    let claude = temp.path().join("claude");
+    let codex = temp.path().join("codex");
+    let gemini = temp.path().join("gemini");
+    fs::create_dir_all(&root).unwrap();
+    fs::create_dir_all(&gemini).unwrap();
+    skill(&claude.join("foo"), "same");
+    skill(&codex.join("foo"), "same");
+    let config = temp.path().join("config.toml");
+    write_config(
+        &config,
+        &root,
+        &[("claude", &claude), ("codex", &codex), ("gemini", &gemini)],
+    );
+    cargo_bin_cmd!("si")
+        .env("SKILLISSUE_CONFIG", &config)
+        .args(["adopt", "foo", "--yes", "--no-color"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("1 skills"))
+        .stdout(predicate::str::contains("3 symlinks created"))
+        .stdout(predicate::str::contains("no data lost"))
+        .stdout(predicate::str::contains("No skill issues"));
+    for target in [&claude, &codex, &gemini] {
+        assert!(
+            fs::symlink_metadata(target.join("foo"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn link_all_without_targets_uses_every_detected_target() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("root");
+    let claude = temp.path().join("claude");
+    let codex = temp.path().join("codex");
+    skill(&root.join("foo"), "one");
+    skill(&root.join("bar"), "two");
+    fs::create_dir_all(&claude).unwrap();
+    fs::create_dir_all(&codex).unwrap();
+    let config = temp.path().join("config.toml");
+    write_config(&config, &root, &[("claude", &claude), ("codex", &codex)]);
+    cargo_bin_cmd!("si")
+        .env("SKILLISSUE_CONFIG", &config)
+        .args(["link", "--all", "--yes", "--no-color"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("4 links created"))
+        .stdout(predicate::str::contains("No skill issues"));
+    for target in [&claude, &codex] {
+        for name in ["foo", "bar"] {
+            assert!(
+                fs::symlink_metadata(target.join(name))
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn link_one_skill_all_targets_and_unlink_target_flag_are_supported() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("root");
+    let claude = temp.path().join("claude");
+    let codex = temp.path().join("codex");
+    skill(&root.join("foo"), "one");
+    fs::create_dir_all(&claude).unwrap();
+    fs::create_dir_all(&codex).unwrap();
+    let config = temp.path().join("config.toml");
+    write_config(&config, &root, &[("claude", &claude), ("codex", &codex)]);
+    cargo_bin_cmd!("si")
+        .env("SKILLISSUE_CONFIG", &config)
+        .args(["link", "foo", "--all", "--yes"])
+        .assert()
+        .success();
+    cargo_bin_cmd!("si")
+        .env("SKILLISSUE_CONFIG", &config)
+        .args(["unlink", "foo", "--target", "codex", "--yes"])
+        .assert()
+        .success();
+    assert!(claude.join("foo").exists());
+    assert!(!codex.join("foo").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn status_reports_per_agent_canonical_coverage() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("root");
+    let claude = temp.path().join("claude");
+    let codex = temp.path().join("codex");
+    skill(&root.join("foo"), "one");
+    fs::create_dir_all(&claude).unwrap();
+    fs::create_dir_all(&codex).unwrap();
+    std::os::unix::fs::symlink(root.join("foo"), claude.join("foo")).unwrap();
+    let config = temp.path().join("config.toml");
+    write_config(&config, &root, &[("claude", &claude), ("codex", &codex)]);
+    cargo_bin_cmd!("si")
+        .env("SKILLISSUE_CONFIG", config)
+        .args(["status", "--no-color"])
+        .assert()
+        .code(2)
+        .stdout(predicate::str::contains("Claude     1/1"))
+        .stdout(predicate::str::contains("Codex      0/1"));
+}

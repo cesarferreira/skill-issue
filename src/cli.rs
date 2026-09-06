@@ -60,7 +60,7 @@ pub enum Command {
     /// Expose canonical skills to configured targets.
     Link(LinkArgs),
     /// Remove managed links without removing canonical skills.
-    Unlink { skill: String, targets: Vec<String> },
+    Unlink(UnlinkArgs),
     /// List or edit target directories.
     Targets {
         #[command(subcommand)]
@@ -81,8 +81,17 @@ pub enum Command {
 pub struct LinkArgs {
     pub skill: Option<String>,
     pub targets: Vec<String>,
-    #[arg(long, conflicts_with = "skill")]
+    /// Use all canonical skills, or all targets when a skill is supplied.
+    #[arg(long)]
     pub all: bool,
+    #[arg(long = "target", action = ArgAction::Append)]
+    pub target: Vec<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct UnlinkArgs {
+    pub skill: String,
+    pub targets: Vec<String>,
     #[arg(long = "target", action = ArgAction::Append)]
     pub target: Vec<String>,
 }

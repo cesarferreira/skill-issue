@@ -47,7 +47,7 @@ si scan
 # Preview the exact migration without changing anything.
 si adopt --dry-run
 
-# Run the guided migration. Destructive confirmations default to No.
+# Run the guided, skill-by-skill migration.
 si
 
 # Verify every canonical skill and symlink.
@@ -58,21 +58,26 @@ si doctor
 copies are moved into the canonical directory and their original locations are
 replaced with symlinks. Divergent copies are never overwritten: the guided flow
 asks which version to adopt or lets you keep each version under a separate
-name.
+name. Rejected versions are verified and preserved under
+`~/.cache/skillissue/migrations/` before their installations are linked to the
+selected copy.
 
 Common follow-up operations:
 
 ```bash
 si diff rust-cli --content
 si targets add opencode ~/.config/opencode/skills
-si link rust-cli claude codex
-si link --all --target gemini
-si unlink rust-cli codex
+si link rust-cli --all
+si link --all
+si link rust-cli --target gemini
+si unlink rust-cli --target gemini
 ```
 
 Every mutating command supports `--dry-run`. Colour is disabled by `NO_COLOR`
 or `--no-color`. After reviewing a plan, `--yes` allows safe non-interactive
-execution; divergent copies still require an interactive choice.
+execution; divergent copies still require an interactive choice. With a skill
+name, `link --all` links that skill into every detected agent. Without a skill
+name, it links every canonical skill into every detected agent.
 
 ## More workflows
 
