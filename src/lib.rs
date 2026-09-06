@@ -275,6 +275,60 @@ fn init(
     ignore_args: &[String],
     dry_run: bool,
 ) -> Result<u8> {
+    let config = initial_setup_config(root, target_args, ignore_args)?;
+    let root = config.root.clone();
+    let config_path = Config::path()?;
+    if config_path.exists() {
+        let current = Config::load()?;
+        if current.root == config.root {
+            println!("skill-issue is already configured with {}", root.display());
+            return Ok(EXIT_OK);
+        }
+        bail!(
+            "configuration already exists at {}; use `si config set-root`",
+            config_path.display()
+        );
+    }
+    println!("{}", theme::heading("INIT PLAN"));
+    println!(
+        "{}  {}",
+        theme::action("CREATE"),
+        theme::path_text(&root.display().to_string())
+    );
+    println!(
+        "{}   {}",
+        theme::action("WRITE"),
+        theme::path_text(&config_path.display().to_string())
+    );
+    if dry_run {
+        println!("{}", theme::dim("Dry run; no files changed."));
+        return Ok(EXIT_OK);
+    }
+    fs::create_dir_all(&root)
+        .with_context(|| format!("create canonical root {}", root.display()))?;
+    config.save()?;
+    println!(
+        "{} Canonical directory {}",
+        theme::ok(),
+        theme::path_text(&display_path(&root))
+    );
+    println!("{}", theme::heading("DETECTED"));
+    let mut detected: Vec<_> = config.targets.keys().collect();
+    detected.sort_by_key(|id| target_rank(id));
+    for id in detected {
+        println!("  {} {}", theme::ok(), theme::agent(&target_label(id)));
+    }
+    if VERBOSITY.load(Ordering::Relaxed) > 0 {
+        println!("{} Configuration saved", theme::ok());
+    }
+    Ok(EXIT_OK)
+}
+
+fn initial_setup_config(
+    root: Option<PathBuf>,
+    target_args: &[String],
+    ignore_args: &[String],
+) -> Result<Config> {
     let root = match root {
         Some(path) => absolute_path(&path)?,
         None if io::stdin().is_terminal() => {
@@ -323,51 +377,7 @@ fn init(
         ignore_args,
     )?;
     validate_config(&config)?;
-    let config_path = Config::path()?;
-    if config_path.exists() {
-        let current = Config::load()?;
-        if current.root == config.root {
-            println!("skill-issue is already configured with {}", root.display());
-            return Ok(EXIT_OK);
-        }
-        bail!(
-            "configuration already exists at {}; use `si config set-root`",
-            config_path.display()
-        );
-    }
-    println!("{}", theme::heading("INIT PLAN"));
-    println!(
-        "{}  {}",
-        theme::action("CREATE"),
-        theme::path_text(&root.display().to_string())
-    );
-    println!(
-        "{}   {}",
-        theme::action("WRITE"),
-        theme::path_text(&config_path.display().to_string())
-    );
-    if dry_run {
-        println!("{}", theme::dim("Dry run; no files changed."));
-        return Ok(EXIT_OK);
-    }
-    fs::create_dir_all(&root)
-        .with_context(|| format!("create canonical root {}", root.display()))?;
-    config.save()?;
-    println!(
-        "{} Canonical directory {}",
-        theme::ok(),
-        theme::path_text(&display_path(&root))
-    );
-    println!("{}", theme::heading("DETECTED"));
-    let mut detected: Vec<_> = config.targets.keys().collect();
-    detected.sort_by_key(|id| target_rank(id));
-    for id in detected {
-        println!("  {} {}", theme::ok(), theme::agent(&target_label(id)));
-    }
-    if VERBOSITY.load(Ordering::Relaxed) > 0 {
-        println!("{} Configuration saved", theme::ok());
-    }
-    Ok(EXIT_OK)
+    Ok(config)
 }
 
 fn setup_command(
@@ -395,11 +405,12 @@ fn setup_command(
             merged
         }
         Err(error) if is_missing_config(&error) => {
-            init(root, &target_args, &ignore_args, dry_run)?;
             if dry_run {
-                return Ok(EXIT_OK);
+                initial_setup_config(root, &target_args, &ignore_args)?
+            } else {
+                init(root, &target_args, &ignore_args, false)?;
+                Config::load()?
             }
-            Config::load()?
         }
         Err(error) => return Err(error),
     };
@@ -3074,6 +3085,9 @@ fn render_sync_check(config: &Config, git: GitHealth, fetched: bool) -> Result<u
 }
 
 fn canonical_skill_names(root: &Path, ignore: &[String]) -> Result<Vec<String>> {
+    if !root.exists() {
+        return Ok(Vec::new());
+    }
     let ignores = build_ignore_set(ignore)?;
     let mut names = Vec::new();
     for entry in sorted_children(root)? {

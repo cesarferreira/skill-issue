@@ -222,6 +222,28 @@ fn setup_discovers_cursor_skills() {
 
 #[cfg(unix)]
 #[test]
+fn first_setup_dry_run_renders_the_collection_plan() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join("skills");
+    skill(&home.join(".claude/skills/foo"), "collect me");
+    let config = temp.path().join("config.toml");
+
+    cargo_bin_cmd!("si")
+        .env("HOME", &home)
+        .env("SKILL_ISSUE_CONFIG", &config)
+        .args(["setup", root.to_str().unwrap(), "--dry-run", "--no-color"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("COPY"))
+        .stdout(predicate::str::contains("LINK"));
+
+    assert!(!root.exists());
+    assert!(!config.exists());
+}
+
+#[cfg(unix)]
+#[test]
 fn setup_links_an_existing_canonical_directory() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("home");
