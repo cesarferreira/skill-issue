@@ -52,7 +52,15 @@ pub enum Command {
         project: Option<PathBuf>,
     },
     /// Set up one canonical skill directory and link every detected agent.
-    Setup { root: Option<PathBuf> },
+    Setup {
+        root: Option<PathBuf>,
+        /// Include a non-standard target as ID=PATH.
+        #[arg(long = "target", value_name = "ID=PATH")]
+        targets: Vec<String>,
+        /// Skip a skill name or glob during collection.
+        #[arg(long = "ignore", value_name = "PATTERN")]
+        ignore: Vec<String>,
+    },
     /// Reconcile canonical skills into configured agent directories.
     Apply,
     /// Show the current health summary.

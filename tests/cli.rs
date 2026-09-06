@@ -160,6 +160,68 @@ fn setup_collects_skills_and_links_every_detected_agent() {
 
 #[cfg(unix)]
 #[test]
+fn setup_accepts_custom_targets_and_ignores_before_collection() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join("skills");
+    let extra = temp.path().join("legacy-skills");
+    skill(&extra.join("collect-me"), "canonical");
+    skill(&extra.join("retired"), "do not collect");
+    let config = temp.path().join("config.toml");
+
+    cargo_bin_cmd!("si")
+        .env("HOME", &home)
+        .env("SKILL_ISSUE_CONFIG", &config)
+        .args([
+            "setup",
+            root.to_str().unwrap(),
+            "--target",
+            &format!("legacy={}", extra.display()),
+            "--ignore",
+            "retired",
+            "--yes",
+            "--no-color",
+        ])
+        .assert()
+        .success();
+
+    assert!(root.join("collect-me").is_dir());
+    assert!(extra.join("collect-me").is_symlink());
+    assert!(extra.join("retired").is_dir());
+    assert!(!root.join("retired").exists());
+    let saved = fs::read_to_string(config).unwrap();
+    assert!(saved.contains("[targets.legacy]"));
+    assert!(saved.contains("retired"));
+}
+
+#[cfg(unix)]
+#[test]
+fn setup_discovers_cursor_skills() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join("skills");
+    let cursor = home.join(".cursor/skills");
+    skill(&cursor.join("cursor-only"), "cursor skill");
+    let config = temp.path().join("config.toml");
+
+    cargo_bin_cmd!("si")
+        .env("HOME", &home)
+        .env("SKILL_ISSUE_CONFIG", &config)
+        .args(["setup", root.to_str().unwrap(), "--yes", "--no-color"])
+        .assert()
+        .success();
+
+    assert!(root.join("cursor-only").is_dir());
+    assert!(cursor.join("cursor-only").is_symlink());
+    assert!(
+        fs::read_to_string(config)
+            .unwrap()
+            .contains("[targets.cursor]")
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn setup_links_an_existing_canonical_directory() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("home");
