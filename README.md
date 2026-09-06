@@ -3,6 +3,8 @@
 
   <p><strong>Deduplicate agent skills with safe canonical symlinks</strong></p>
 
+  <p>Your agents have a skill issue. Fortunately, it is mostly symlinks.</p>
+
   <p>
     <img alt="License" src="https://img.shields.io/badge/license-MIT-green">
     <img alt="Rust" src="https://img.shields.io/badge/rust-1.85%2B-orange">
@@ -38,7 +40,7 @@ si --help
 ## Quickstart
 
 ```bash
-# Choose the directory that will hold the real copies.
+# Choose where the one true copies will live. No council required.
 si init ~/code/skills
 
 # Inspect skills found in Claude Code, Codex, Gemini, and .agents.
@@ -47,7 +49,7 @@ si scan
 # Preview the exact migration without changing anything.
 si adopt --dry-run
 
-# Run the guided, skill-by-skill migration.
+# Politely ask every agent to stop hoarding.
 si
 
 # Verify every canonical skill and symlink.
@@ -61,6 +63,9 @@ asks which version to adopt or lets you keep each version under a separate
 name. Rejected versions are verified and preserved under
 `~/.cache/skillissue/migrations/` before their installations are linked to the
 selected copy.
+
+Once everything is healthy, `si` returns to its natural state: quietly judging
+your filesystem with `✓ No skill issues.`
 
 Common follow-up operations:
 
