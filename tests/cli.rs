@@ -316,6 +316,58 @@ fn apply_preserves_a_divergent_physical_copy() {
     assert!(!target.join("foo").is_symlink());
 }
 
+#[cfg(unix)]
+#[test]
+fn setup_collects_existing_skills_and_links_every_detected_agent() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let claude = home.join(".claude/skills");
+    let codex = home.join(".codex/skills");
+    let root = home.join("code/skills");
+    skill(&claude.join("claude-only"), "one");
+    skill(&claude.join("shared"), "same");
+    skill(&codex.join("shared"), "same");
+    let config = temp.path().join("config.toml");
+
+    cargo_bin_cmd!("si")
+        .env("HOME", &home)
+        .env("SKILL_ISSUE_CONFIG", &config)
+        .args(["setup", root.to_str().unwrap(), "--yes", "--no-color"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No skill issues"));
+
+    for name in ["claude-only", "shared"] {
+        assert!(root.join(name).is_dir());
+        assert!(claude.join(name).is_symlink());
+        assert!(codex.join(name).is_symlink());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn setup_links_an_existing_canonical_directory() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join("code/skills");
+    let claude = home.join(".claude/skills");
+    skill(&root.join("foo"), "canonical");
+    fs::create_dir_all(&claude).unwrap();
+    let config = temp.path().join("config.toml");
+
+    cargo_bin_cmd!("si")
+        .env("HOME", &home)
+        .env("SKILL_ISSUE_CONFIG", &config)
+        .args(["setup", root.to_str().unwrap(), "--yes", "--no-color"])
+        .assert()
+        .success();
+
+    assert_eq!(
+        fs::canonicalize(claude.join("foo")).unwrap(),
+        fs::canonicalize(root.join("foo")).unwrap()
+    );
+}
+
 #[test]
 fn completions_generate_shell_script_without_configuration() {
     cargo_bin_cmd!("si")
