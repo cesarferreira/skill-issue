@@ -183,7 +183,7 @@ fn bootstrap_link_all_asks_once_and_uses_every_detected_agent() {
         .args(["link", "--all", "--no-color"]);
     let mut session = Session::spawn(command).unwrap();
     session.set_expect_timeout(Some(Duration::from_secs(10)));
-    session.expect("Detected:").unwrap();
+    session.expect("DETECTED").unwrap();
     session
         .expect("Link 2 skills into all detected agents?")
         .unwrap();

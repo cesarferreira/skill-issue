@@ -2710,7 +2710,7 @@ fn link_command(config: &Config, args: LinkArgs, dry_run: bool) -> Result<u8> {
         println!("{}", theme::dim("All requested links already exist."));
         return Ok(EXIT_OK);
     }
-    println!("Detected:");
+    println!("{}", theme::heading("DETECTED"));
     for target in &target_ids {
         println!("  {} {}", theme::ok(), theme::agent(&target_label(target)));
     }
