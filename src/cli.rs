@@ -1,4 +1,5 @@
-use clap::{ArgAction, Args, Parser, Subcommand};
+use clap::{ArgAction, Args, CommandFactory, Parser, Subcommand};
+use clap_complete::Shell;
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
@@ -17,6 +18,12 @@ pub struct Cli {
     /// Increase diagnostic detail (-v or -vv).
     #[arg(short, action = ArgAction::Count, global = true)]
     pub verbose: u8,
+    /// Emit machine-readable JSON for read commands.
+    #[arg(long, global = true)]
+    pub json: bool,
+    /// Apply a displayed safe plan without prompting.
+    #[arg(long, global = true)]
+    pub yes: bool,
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -26,11 +33,19 @@ pub enum Command {
     /// Configure the canonical skill directory.
     Init { root: Option<PathBuf> },
     /// Scan configured skill locations without changing them.
-    Scan,
+    Scan {
+        /// Include project-local .claude and .agents skills.
+        #[arg(long, value_name = "PATH", num_args = 0..=1, default_missing_value = ".")]
+        project: Option<PathBuf>,
+    },
     /// Move skills into the canonical root and replace copies with links.
     Adopt { skill: Option<String> },
     /// Show the current health summary.
-    Status,
+    Status {
+        /// Include canonical-root Git health.
+        #[arg(long)]
+        git: bool,
+    },
     /// Diagnose and optionally repair unambiguous issues.
     Doctor {
         #[arg(long)]
@@ -56,6 +71,10 @@ pub enum Command {
         #[command(subcommand)]
         command: Option<ConfigCommand>,
     },
+    /// Link every canonical skill into every configured target.
+    Restore,
+    /// Generate shell completion definitions.
+    Completions { shell: Shell },
 }
 
 #[derive(Args, Debug)]
@@ -76,5 +95,21 @@ pub enum TargetCommand {
 
 #[derive(Subcommand, Debug)]
 pub enum ConfigCommand {
-    SetRoot { root: PathBuf },
+    SetRoot {
+        root: PathBuf,
+    },
+    SetRelativeLinks {
+        #[arg(action = ArgAction::Set)]
+        enabled: bool,
+    },
+    AddIgnore {
+        pattern: String,
+    },
+    RemoveIgnore {
+        pattern: String,
+    },
+}
+
+pub fn command() -> clap::Command {
+    Cli::command()
 }

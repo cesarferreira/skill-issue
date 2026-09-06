@@ -1,6 +1,6 @@
 [package]
 name = "skill-issue"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Deduplicate agent skills with safe canonical symlinks"
@@ -16,14 +16,22 @@ path = "src/main.rs"
 anyhow = "1"
 blake3 = "1"
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
 console = "0.16"
 dialoguer = "0.12"
 dirs = "6"
+filetime = "0.2"
+globset = "0.4"
+pathdiff = "0.2"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 similar = "2"
 tempfile = "3"
 toml = "0.9"
 walkdir = "2"
+
+[target.'cfg(unix)'.dependencies]
+xattr = "1"
 
 [dev-dependencies]
 assert_cmd = "2"

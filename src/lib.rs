@@ -1,14 +1,17 @@
 use anyhow::{Context, Result, anyhow, bail};
 use blake3::Hasher;
+use clap_complete::generate;
 use console::{Style, style};
 use dialoguer::{Confirm, Input, Select, theme::ColorfulTheme};
+use globset::{Glob, GlobSet, GlobSetBuilder};
+use serde::Serialize;
 use similar::TextDiff;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io::{self, BufReader, IsTerminal, Read, Write};
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use walkdir::{DirEntry, WalkDir};
 
 mod cli;
@@ -27,6 +30,8 @@ const EXIT_CONFLICTS: u8 = 3;
 const EXIT_CONFIG: u8 = 4;
 static TEMP_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
 static VERBOSITY: AtomicU8 = AtomicU8::new(0);
+static JSON_OUTPUT: AtomicBool = AtomicBool::new(false);
+static ASSUME_YES: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone, Debug)]
 struct AdoptionPlan {
@@ -35,6 +40,8 @@ struct AdoptionPlan {
     fingerprint: String,
     transfer: CanonicalTransfer,
     replacements: Vec<Replacement>,
+    ignore: Vec<String>,
+    relative_links: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -53,8 +60,15 @@ struct Replacement {
 pub fn run(cli: Cli) -> Result<u8> {
     set_color(cli.no_color);
     VERBOSITY.store(cli.verbose, Ordering::Relaxed);
+    JSON_OUTPUT.store(cli.json, Ordering::Relaxed);
+    ASSUME_YES.store(cli.yes, Ordering::Relaxed);
     match cli.command {
         Some(Command::Init { root }) => init(root, cli.dry_run),
+        Some(Command::Completions { shell }) => {
+            let mut command = cli::command();
+            generate(shell, &mut command, "si", &mut io::stdout());
+            Ok(EXIT_OK)
+        }
         Some(command) => {
             let config = match Config::load() {
                 Ok(config) => config,
@@ -72,11 +86,11 @@ pub fn run(cli: Cli) -> Result<u8> {
                 return Ok(EXIT_CONFIG);
             }
             match command {
-                Command::Scan => scan_command(&config),
+                Command::Scan { project } => scan_command(&config, project.as_deref()),
                 Command::Adopt { skill } => {
                     adopt_command(&config, skill.as_deref(), cli.dry_run, true)
                 }
-                Command::Status => status_command(&config),
+                Command::Status { git } => status_command(&config, git),
                 Command::Doctor { fix } => doctor_command(&config, fix, cli.dry_run),
                 Command::Diff { skill, content } => diff_command(&config, &skill, content),
                 Command::Link(args) => link_command(&config, args, cli.dry_run),
@@ -85,7 +99,9 @@ pub fn run(cli: Cli) -> Result<u8> {
                 }
                 Command::Targets { command } => targets_command(config, command, cli.dry_run),
                 Command::Config { command } => config_command(config, command, cli.dry_run),
+                Command::Restore => restore_command(&config, cli.dry_run),
                 Command::Init { .. } => unreachable!(),
+                Command::Completions { .. } => unreachable!(),
             }
         }
         None => default_command(cli.dry_run),
@@ -183,6 +199,7 @@ fn normalize_lexical(path: &Path) -> PathBuf {
 }
 
 fn validate_config(config: &Config) -> Result<()> {
+    build_ignore_set(&config.ignore)?;
     for (id, target) in config.targets.iter().filter(|(_, t)| t.enabled) {
         let root = fs::canonicalize(&config.root).unwrap_or_else(|_| config.root.clone());
         let target_path = fs::canonicalize(&target.path).unwrap_or_else(|_| target.path.clone());
@@ -242,6 +259,8 @@ fn init(root: Option<PathBuf>, dry_run: bool) -> Result<u8> {
     let config = Config {
         root: root.clone(),
         targets,
+        relative_links: false,
+        ignore: Vec::new(),
     };
     validate_config(&config)?;
     let config_path = Config::path()?;
@@ -275,6 +294,7 @@ fn init(root: Option<PathBuf>, dry_run: bool) -> Result<u8> {
 }
 
 pub fn scan(config: &Config) -> Result<ScanResult> {
+    let ignores = build_ignore_set(&config.ignore)?;
     let mut groups = BTreeMap::<String, SkillGroup>::new();
     let mut logical_names = BTreeMap::<String, String>::new();
     if config.root.exists() {
@@ -291,7 +311,7 @@ pub fn scan(config: &Config) -> Result<ScanResult> {
                 );
             }
             check_case_collision(&mut logical_names, &name, "configured skill locations")?;
-            let fp = fingerprint(&entry.path())?;
+            let fp = fingerprint_with_matcher(&entry.path(), &ignores)?;
             groups
                 .entry(name.clone())
                 .or_insert_with(|| empty_group(&name))
@@ -316,7 +336,7 @@ pub fn scan(config: &Config) -> Result<ScanResult> {
                 continue;
             }
             check_case_collision(&mut logical_names, &name, "configured skill locations")?;
-            let installation = inspect_installation(config, target_id, entry.path())?;
+            let installation = inspect_installation(config, &ignores, target_id, entry.path())?;
             groups
                 .entry(name.clone())
                 .or_insert_with(|| empty_group(&name))
@@ -374,7 +394,12 @@ fn ignored_top_level(name: &str) -> bool {
     name == ".git" || name == ".DS_Store" || name.starts_with(".skillissue-")
 }
 
-fn inspect_installation(config: &Config, target: &str, path: PathBuf) -> Result<Installation> {
+fn inspect_installation(
+    config: &Config,
+    ignores: &GlobSet,
+    target: &str,
+    path: PathBuf,
+) -> Result<Installation> {
     let metadata = fs::symlink_metadata(&path)?;
     if metadata.file_type().is_symlink() {
         let raw_target = fs::read_link(&path)?;
@@ -389,7 +414,7 @@ fn inspect_installation(config: &Config, target: &str, path: PathBuf) -> Result<
             InstallationKind::ForeignSymlink
         };
         let fingerprint = if exists {
-            Some(fingerprint(&resolved)?)
+            Some(fingerprint_with_matcher(&resolved, ignores)?)
         } else {
             None
         };
@@ -401,7 +426,7 @@ fn inspect_installation(config: &Config, target: &str, path: PathBuf) -> Result<
             link_target: Some(resolved),
         })
     } else if metadata.is_dir() {
-        let fingerprint = Some(fingerprint(&path)?);
+        let fingerprint = Some(fingerprint_with_matcher(&path, ignores)?);
         Ok(Installation {
             target: target.to_string(),
             path,
@@ -422,6 +447,25 @@ fn is_canonical_skill_path(root: &Path, path: &Path) -> bool {
 }
 
 pub fn fingerprint(root: &Path) -> Result<String> {
+    fingerprint_with_ignores(root, &[])
+}
+
+pub fn fingerprint_with_ignores(root: &Path, patterns: &[String]) -> Result<String> {
+    let ignores = build_ignore_set(patterns)?;
+    fingerprint_with_matcher(root, &ignores)
+}
+
+fn build_ignore_set(patterns: &[String]) -> Result<GlobSet> {
+    let mut builder = GlobSetBuilder::new();
+    for pattern in patterns {
+        builder.add(
+            Glob::new(pattern).with_context(|| format!("invalid ignore pattern `{pattern}`"))?,
+        );
+    }
+    Ok(builder.build()?)
+}
+
+fn fingerprint_with_matcher(root: &Path, ignores: &GlobSet) -> Result<String> {
     if !root.is_dir() {
         bail!("not a readable skill directory: {}", root.display());
     }
@@ -429,7 +473,7 @@ pub fn fingerprint(root: &Path) -> Result<String> {
     let walker = WalkDir::new(root)
         .follow_links(false)
         .into_iter()
-        .filter_entry(include_entry);
+        .filter_entry(|entry| include_entry(entry, root, ignores));
     for entry in walker {
         let entry = entry.with_context(|| format!("walk {}", root.display()))?;
         if entry.path() == root {
@@ -481,9 +525,16 @@ pub fn fingerprint(root: &Path) -> Result<String> {
     Ok(directory.finalize().to_hex().to_string())
 }
 
-fn include_entry(entry: &DirEntry) -> bool {
+fn include_entry(entry: &DirEntry, root: &Path, ignores: &GlobSet) -> bool {
     let name = entry.file_name();
-    name != OsStr::new(".git") && name != OsStr::new(".DS_Store")
+    if name == OsStr::new(".git") || name == OsStr::new(".DS_Store") {
+        return false;
+    }
+    entry
+        .path()
+        .strip_prefix(root)
+        .map(|relative| !ignores.is_match(relative))
+        .unwrap_or(true)
 }
 
 impl SkillGroup {
@@ -537,14 +588,38 @@ impl SkillGroup {
     }
 }
 
-fn scan_command(config: &Config) -> Result<u8> {
-    let result = scan(config)?;
+fn scan_command(config: &Config, project: Option<&Path>) -> Result<u8> {
+    let effective = config_with_project(config, project)?;
+    let result = scan(&effective)?;
+    if JSON_OUTPUT.load(Ordering::Relaxed) {
+        let skills: Vec<_> = result
+            .groups
+            .values()
+            .map(|group| {
+                serde_json::json!({
+                    "name": group.name,
+                    "status": group.status(),
+                    "canonical": group.canonical,
+                    "installations": group.installations,
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "targets": result.target_counts,
+                "missing_targets": result.missing_targets,
+                "skills": skills,
+            }))?
+        );
+        return Ok(result_exit(&result));
+    }
     println!("Scanning skill locations...");
     for (target, count) in &result.target_counts {
         if VERBOSITY.load(Ordering::Relaxed) > 0 {
             println!(
                 "  {target:<12} {count:>3}  {}",
-                config.targets[target].path.display()
+                effective.targets[target].path.display()
             );
         } else {
             println!("  {target:<12} {count:>3}");
@@ -560,6 +635,34 @@ fn scan_command(config: &Config) -> Result<u8> {
     );
     print_groups(&result);
     Ok(result_exit(&result))
+}
+
+fn config_with_project(config: &Config, project: Option<&Path>) -> Result<Config> {
+    let Some(project) = project else {
+        return Ok(config.clone());
+    };
+    let project = absolute_path(project)?;
+    let mut effective = config.clone();
+    for (id, relative) in [
+        ("project-claude", ".claude/skills"),
+        ("project-agents", ".agents/skills"),
+    ] {
+        let path = project.join(relative);
+        if path.is_dir() {
+            if effective.targets.contains_key(id) {
+                bail!("configured target id `{id}` conflicts with project discovery");
+            }
+            effective.targets.insert(
+                id.to_string(),
+                TargetConfig {
+                    path,
+                    enabled: true,
+                },
+            );
+        }
+    }
+    validate_config(&effective)?;
+    Ok(effective)
 }
 
 fn print_groups(result: &ScanResult) {
@@ -653,7 +756,7 @@ fn result_exit(result: &ScanResult) -> u8 {
     }
 }
 
-fn status_command(config: &Config) -> Result<u8> {
+fn status_command(config: &Config, include_git: bool) -> Result<u8> {
     let result = scan(config)?;
     let canonical = result
         .groups
@@ -667,13 +770,48 @@ fn status_command(config: &Config) -> Result<u8> {
         .flat_map(|g| &g.installations)
         .filter(|i| i.kind == InstallationKind::ManagedSymlink)
         .count();
+    let recovery = recovery_artifacts(config)?;
+    let code = result_exit(&result).max(if recovery.is_empty() {
+        EXIT_OK
+    } else {
+        EXIT_ISSUES
+    });
+    let git = include_git.then(|| git_health(&config.root)).transpose()?;
+    if JSON_OUTPUT.load(Ordering::Relaxed) {
+        let skills: Vec<_> = result
+            .groups
+            .values()
+            .map(|group| {
+                serde_json::json!({
+                    "name": group.name,
+                    "status": group.status(),
+                    "canonical": group.canonical,
+                    "installations": group.installations,
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "root": config.root,
+                "canonical_skills": canonical,
+                "targets": config.targets.values().filter(|target| target.enabled).count(),
+                "installations": installations,
+                "healthy_symlinks": managed,
+                "healthy": code == EXIT_OK,
+                "recovery_artifacts": recovery,
+                "skills": skills,
+                "git": git,
+            }))?
+        );
+        return Ok(code);
+    }
     println!("{}", Style::new().bold().apply_to("Canonical directory"));
     println!("  {}", config.root.display());
     println!(
         "{canonical} skills\n{} targets\n{installations} installations\n{managed} healthy symlinks",
         config.targets.values().filter(|t| t.enabled).count()
     );
-    let code = result_exit(&result);
     if code == EXIT_OK {
         println!("{} No skill issues.", style("✓").green());
     } else {
@@ -682,6 +820,13 @@ fn status_command(config: &Config) -> Result<u8> {
             println!(
                 "{} {target} target directory is missing",
                 style("⚠").yellow()
+            );
+        }
+        for path in &recovery {
+            println!(
+                "{} interrupted-migration recovery artifact: {}",
+                style("⚠").yellow(),
+                path.display()
             );
         }
         for group in result
@@ -706,7 +851,89 @@ fn status_command(config: &Config) -> Result<u8> {
         }
         println!("Run: si doctor");
     }
+    if let Some(git) = git {
+        print_git_health(&git);
+    }
     Ok(code)
+}
+
+#[derive(Debug, Serialize)]
+struct GitHealth {
+    repository: bool,
+    dirty: bool,
+    upstream: Option<String>,
+    ahead: Option<u64>,
+}
+
+fn git_health(root: &Path) -> Result<GitHealth> {
+    if !root.join(".git").exists() {
+        return Ok(GitHealth {
+            repository: false,
+            dirty: false,
+            upstream: None,
+            ahead: None,
+        });
+    }
+    let run = |args: &[&str]| -> Result<std::process::Output> {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .with_context(|| "run git")
+    };
+    let status = run(&["status", "--porcelain"])?;
+    if !status.status.success() {
+        bail!("could not inspect Git status in {}", root.display());
+    }
+    let upstream_output = run(&["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])?;
+    let upstream = upstream_output.status.success().then(|| {
+        String::from_utf8_lossy(&upstream_output.stdout)
+            .trim()
+            .to_string()
+    });
+    let ahead = if upstream.is_some() {
+        let output = run(&["rev-list", "--count", "@{u}..HEAD"])?;
+        output
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&output.stdout).trim().parse())
+            .transpose()?
+    } else {
+        None
+    };
+    Ok(GitHealth {
+        repository: true,
+        dirty: !status.stdout.is_empty(),
+        upstream,
+        ahead,
+    })
+}
+
+fn print_git_health(git: &GitHealth) {
+    println!("\n{}", Style::new().bold().apply_to("Git"));
+    if !git.repository {
+        println!(
+            "{} Canonical root is not a Git repository",
+            style("⚠").yellow()
+        );
+        return;
+    }
+    println!("{} repository", style("✓").green());
+    println!(
+        "{} working tree",
+        if git.dirty {
+            style("⚠ dirty").yellow()
+        } else {
+            style("✓ clean").green()
+        }
+    );
+    match (&git.upstream, git.ahead) {
+        (Some(upstream), Some(ahead)) => println!(
+            "{} upstream {upstream}; {ahead} commits ahead",
+            style("✓").green()
+        ),
+        _ => println!("{} no upstream configured", style("⚠").yellow()),
+    }
 }
 
 fn issue_mark(status: SkillStatus) -> console::StyledObject<&'static str> {
@@ -731,11 +958,14 @@ fn default_command(dry_run: bool) -> Result<u8> {
     };
     validate_config(&config)?;
     let result = scan(&config)?;
+    if JSON_OUTPUT.load(Ordering::Relaxed) {
+        return status_command(&config, false);
+    }
     if result_exit(&result) == EXIT_OK {
-        return status_command(&config);
+        return status_command(&config, false);
     }
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
-        return status_command(&config);
+        return status_command(&config, false);
     }
     println!("Found skill issues. Preparing a safe migration plan...\n");
     adopt_from_scan(&config, &result, None, dry_run, true)
@@ -789,13 +1019,14 @@ fn adopt_from_scan(
         println!("Dry run; no files changed.");
         return Ok(result_exit(result));
     }
-    if !tty {
+    if !tty && !ASSUME_YES.load(Ordering::Relaxed) {
         bail!("adoption requires an interactive confirmation; use --dry-run to inspect the plan");
     }
-    if !Confirm::with_theme(&ColorfulTheme::default())
-        .with_prompt("Proceed?")
-        .default(false)
-        .interact()?
+    if !ASSUME_YES.load(Ordering::Relaxed)
+        && !Confirm::with_theme(&ColorfulTheme::default())
+            .with_prompt("Proceed?")
+            .default(false)
+            .interact()?
     {
         println!("Cancelled. No files were changed.");
         return Ok(result_exit(result));
@@ -825,9 +1056,15 @@ fn plans_for_group(config: &Config, group: &SkillGroup, tty: bool) -> Result<Vec
             .cloned()
             .unwrap_or_default();
         if group.status() != SkillStatus::Divergent {
-            return Ok(plan_existing(&group.name, canonical, matching)
-                .into_iter()
-                .collect());
+            return Ok(plan_existing(
+                &group.name,
+                canonical,
+                matching,
+                &config.ignore,
+                config.relative_links,
+            )
+            .into_iter()
+            .collect());
         }
         if !tty {
             bail!("{} has divergent copies", group.name);
@@ -844,12 +1081,18 @@ fn plans_for_group(config: &Config, group: &SkillGroup, tty: bool) -> Result<Vec
             .default(3)
             .interact()?
         {
-            0 => Ok(plan_existing(&group.name, canonical, matching)
-                .into_iter()
-                .collect()),
+            0 => Ok(plan_existing(
+                &group.name,
+                canonical,
+                matching,
+                &config.ignore,
+                config.relative_links,
+            )
+            .into_iter()
+            .collect()),
             1 => plans_keep_both(config, group, &physical_by_fp, Some(&canonical.fingerprint)),
             2 => {
-                diff_group(group, true)?;
+                diff_group(group, true, &config.ignore)?;
                 plans_for_group(config, group, tty)
             }
             _ => Ok(Vec::new()),
@@ -905,7 +1148,7 @@ fn plans_for_group(config: &Config, group: &SkillGroup, tty: bool) -> Result<Vec
         } else if choice == versions.len() {
             plans_keep_both(config, group, &physical_by_fp, None)
         } else if choice == versions.len() + 1 {
-            diff_group(group, true)?;
+            diff_group(group, true, &config.ignore)?;
             plans_for_group(config, group, tty)
         } else {
             Ok(Vec::new())
@@ -934,6 +1177,8 @@ fn plan_existing(
     name: &str,
     canonical: &CanonicalSkill,
     installations: Vec<PathBuf>,
+    ignore: &[String],
+    relative_links: bool,
 ) -> Option<AdoptionPlan> {
     if installations.is_empty() {
         return None;
@@ -950,6 +1195,8 @@ fn plan_existing(
                 original,
             })
             .collect(),
+        ignore: ignore.to_vec(),
+        relative_links,
     })
 }
 
@@ -1003,6 +1250,8 @@ fn plan_new(
         fingerprint,
         transfer,
         replacements,
+        ignore: config.ignore.clone(),
+        relative_links: config.relative_links,
     })
 }
 
@@ -1063,7 +1312,13 @@ fn plans_keep_both(
     }
     if let (Some(canonical), Some(fp)) = (&group.canonical, existing_fp) {
         if let Some(paths) = versions.get(fp) {
-            if let Some(plan) = plan_existing(&group.name, canonical, paths.clone()) {
+            if let Some(plan) = plan_existing(
+                &group.name,
+                canonical,
+                paths.clone(),
+                &config.ignore,
+                config.relative_links,
+            ) {
                 plans.push(plan);
             }
         }
@@ -1104,6 +1359,7 @@ fn render_adoption_plans(plans: &[AdoptionPlan]) {
                 );
             }
         }
+        println!("VERIFY  {}", plan.canonical.display());
         for replacement in &plan.replacements {
             if let Some(backup) = &replacement.backup {
                 println!(
@@ -1115,7 +1371,8 @@ fn render_adoption_plans(plans: &[AdoptionPlan]) {
             println!(
                 "LINK\n  {}\n    -> {}",
                 replacement.original.display(),
-                plan.canonical.display()
+                managed_link_value(&plan.canonical, &replacement.original, plan.relative_links,)
+                    .display()
             );
             println!("VERIFY  {}", replacement.original.display());
             if let Some(backup) = &replacement.backup {
@@ -1146,7 +1403,7 @@ fn execute_adoption(plan: &AdoptionPlan) -> Result<()> {
         }
         CanonicalTransfer::Copy { source, temporary } => {
             if let Err(error) = copy_skill(source, temporary).and_then(|_| {
-                let actual = fingerprint(temporary)?;
+                let actual = fingerprint_with_ignores(temporary, &plan.ignore)?;
                 if actual != plan.fingerprint {
                     bail!("verification failed while copying {}", source.display());
                 }
@@ -1161,7 +1418,7 @@ fn execute_adoption(plan: &AdoptionPlan) -> Result<()> {
             None
         }
     };
-    if fingerprint(&plan.canonical)? != plan.fingerprint {
+    if fingerprint_with_ignores(&plan.canonical, &plan.ignore)? != plan.fingerprint {
         if let Some(source) = &moved_source {
             let _ = fs::rename(&plan.canonical, source);
         } else if created_canonical {
@@ -1181,7 +1438,7 @@ fn execute_adoption(plan: &AdoptionPlan) -> Result<()> {
                     .with_context(|| format!("stage {}", replacement.original.display()))?;
                 staged.push((replacement.original.clone(), backup.clone()));
             }
-            create_symlink(&plan.canonical, &replacement.original)?;
+            create_managed_symlink(&plan.canonical, &replacement.original, plan.relative_links)?;
             created_links.push(replacement.original.clone());
             verify_link(&replacement.original, &plan.canonical)?;
         }
@@ -1238,6 +1495,7 @@ fn copy_skill(source: &Path, destination: &Path) -> Result<()> {
             directories.push((entry.path().to_path_buf(), output));
         } else if entry.file_type().is_file() {
             fs::copy(entry.path(), &output)?;
+            copy_metadata(entry.path(), &output)?;
         } else if entry.file_type().is_symlink() {
             create_symlink(&fs::read_link(entry.path())?, &output)?;
         } else {
@@ -1245,8 +1503,38 @@ fn copy_skill(source: &Path, destination: &Path) -> Result<()> {
         }
     }
     for (input, output) in directories.into_iter().rev() {
-        fs::set_permissions(output, fs::metadata(input)?.permissions())?;
+        copy_metadata(&input, &output)?;
     }
+    Ok(())
+}
+
+fn copy_metadata(input: &Path, output: &Path) -> Result<()> {
+    let metadata = fs::metadata(input)?;
+    fs::set_permissions(output, metadata.permissions())?;
+    filetime::set_file_times(
+        output,
+        filetime::FileTime::from_last_access_time(&metadata),
+        filetime::FileTime::from_last_modification_time(&metadata),
+    )?;
+    copy_extended_attributes(input, output)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn copy_extended_attributes(input: &Path, output: &Path) -> Result<()> {
+    for name in
+        xattr::list(input).with_context(|| format!("read attributes from {}", input.display()))?
+    {
+        if let Some(value) = xattr::get(input, &name)? {
+            xattr::set(output, &name, &value)
+                .with_context(|| format!("copy attribute {:?} to {}", name, output.display()))?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn copy_extended_attributes(_input: &Path, _output: &Path) -> Result<()> {
     Ok(())
 }
 
@@ -1258,7 +1546,20 @@ fn create_symlink(target: &Path, link: &Path) -> Result<()> {
 
 #[cfg(not(unix))]
 fn create_symlink(_target: &Path, _link: &Path) -> Result<()> {
-    bail!("symlink mutations are supported only on macOS and Linux in V0.1")
+    bail!("symlink mutations are supported only on macOS and Linux")
+}
+
+fn managed_link_value(target: &Path, link: &Path, relative: bool) -> PathBuf {
+    if relative {
+        pathdiff::diff_paths(target, link.parent().unwrap_or(Path::new(".")))
+            .unwrap_or_else(|| target.to_path_buf())
+    } else {
+        target.to_path_buf()
+    }
+}
+
+fn create_managed_symlink(target: &Path, link: &Path, relative: bool) -> Result<()> {
+    create_symlink(&managed_link_value(target, link, relative), link)
 }
 
 fn verify_link(link: &Path, expected: &Path) -> Result<()> {
@@ -1279,6 +1580,47 @@ fn resolve_link_path(link: &Path, raw_target: &Path) -> PathBuf {
 }
 
 fn doctor_command(config: &Config, fix: bool, dry_run: bool) -> Result<u8> {
+    if JSON_OUTPUT.load(Ordering::Relaxed) {
+        if fix {
+            bail!("--json cannot be combined with --fix");
+        }
+        let result = scan(config)?;
+        let recovery = recovery_artifacts(config)?;
+        let mut issues = Vec::new();
+        if !config.root.is_dir() {
+            issues.push(serde_json::json!({"kind": "missing_canonical_root", "path": config.root}));
+        }
+        for target in &result.missing_targets {
+            issues.push(serde_json::json!({"kind": "missing_target", "target": target}));
+        }
+        for path in recovery {
+            issues.push(serde_json::json!({"kind": "recovery_artifact", "path": path}));
+        }
+        for group in result.groups.values() {
+            for installation in &group.installations {
+                if installation.kind != InstallationKind::ManagedSymlink {
+                    issues.push(serde_json::json!({
+                        "kind": installation.kind,
+                        "skill": group.name,
+                        "target": installation.target,
+                        "path": installation.path,
+                    }));
+                }
+            }
+        }
+        let code = result_exit(&result).max(if issues.is_empty() {
+            EXIT_OK
+        } else {
+            EXIT_ISSUES
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(
+                &serde_json::json!({"healthy": issues.is_empty(), "issues": issues})
+            )?
+        );
+        return Ok(code);
+    }
     println!("Checking skillissue...");
     let root_ok = config.root.is_dir();
     println!(
@@ -1377,7 +1719,13 @@ fn doctor_command(config: &Config, fix: bool, dry_run: bool) -> Result<u8> {
                 })
                 .map(|i| i.path.clone())
                 .collect();
-            if let Some(plan) = plan_existing(&group.name, canonical, matching) {
+            if let Some(plan) = plan_existing(
+                &group.name,
+                canonical,
+                matching,
+                &config.ignore,
+                config.relative_links,
+            ) {
                 adoptions.push(plan);
             }
             for installation in group
@@ -1418,7 +1766,9 @@ fn doctor_command(config: &Config, fix: bool, dry_run: bool) -> Result<u8> {
     }
     for (link, target, old_target) in &link_repairs {
         fs::remove_file(link)?;
-        if let Err(error) = create_symlink(target, link).and_then(|_| verify_link(link, target)) {
+        if let Err(error) = create_managed_symlink(target, link, config.relative_links)
+            .and_then(|_| verify_link(link, target))
+        {
             if fs::symlink_metadata(link).is_ok() {
                 let _ = fs::remove_file(link);
             }
@@ -1454,6 +1804,9 @@ fn recovery_artifacts(config: &Config) -> Result<Vec<PathBuf>> {
 }
 
 fn require_confirmation(prompt: &str) -> Result<()> {
+    if ASSUME_YES.load(Ordering::Relaxed) {
+        return Ok(());
+    }
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         bail!("this mutation requires an interactive confirmation; use --dry-run to inspect it");
     }
@@ -1474,12 +1827,20 @@ struct ManifestEntry {
     source: PathBuf,
 }
 
-fn directory_manifest(root: &Path) -> Result<BTreeMap<String, ManifestEntry>> {
+#[derive(Serialize)]
+struct DiffChange {
+    status: char,
+    path: String,
+    content: Option<String>,
+}
+
+fn directory_manifest(root: &Path, ignore: &[String]) -> Result<BTreeMap<String, ManifestEntry>> {
+    let ignores = build_ignore_set(ignore)?;
     let mut manifest = BTreeMap::new();
     let walker = WalkDir::new(root)
         .follow_links(false)
         .into_iter()
-        .filter_entry(include_entry);
+        .filter_entry(|entry| include_entry(entry, root, &ignores));
     for entry in walker {
         let entry = entry?;
         if entry.path() == root || entry.file_type().is_dir() {
@@ -1531,10 +1892,10 @@ fn diff_command(config: &Config, skill: &str, content: bool) -> Result<u8> {
         .groups
         .get(skill)
         .ok_or_else(|| anyhow!("skill `{skill}` was not found"))?;
-    diff_group(group, content)
+    diff_group(group, content, &config.ignore)
 }
 
-fn diff_group(group: &SkillGroup, content: bool) -> Result<u8> {
+fn diff_group(group: &SkillGroup, content: bool, ignore: &[String]) -> Result<u8> {
     let mut copies = Vec::<(String, PathBuf, String)>::new();
     if let Some(canonical) = &group.canonical {
         copies.push((
@@ -1565,36 +1926,67 @@ fn diff_group(group: &SkillGroup, content: bool) -> Result<u8> {
         .unwrap_or(1);
     let left = &copies[first];
     let right = &copies[second];
-    println!("{} ↔ {}", left.0, right.0);
-    let left_manifest = directory_manifest(&left.1)?;
-    let right_manifest = directory_manifest(&right.1)?;
+    let left_manifest = directory_manifest(&left.1, ignore)?;
+    let right_manifest = directory_manifest(&right.1, ignore)?;
     let names: BTreeSet<_> = left_manifest
         .keys()
         .chain(right_manifest.keys())
         .cloned()
         .collect();
-    let mut changes = 0;
+    let mut changes = Vec::new();
     for name in names {
         match (left_manifest.get(&name), right_manifest.get(&name)) {
             (None, Some(_)) => {
-                println!("A {name}");
-                changes += 1;
+                changes.push(DiffChange {
+                    status: 'A',
+                    path: name,
+                    content: None,
+                });
             }
             (Some(_), None) => {
-                println!("D {name}");
-                changes += 1;
+                changes.push(DiffChange {
+                    status: 'D',
+                    path: name,
+                    content: None,
+                });
             }
             (Some(a), Some(b)) if a.kind != b.kind || a.hash != b.hash => {
-                println!("M {name}");
-                changes += 1;
-                if content && a.kind == b'F' && b.kind == b'F' {
-                    print_content_diff(&name, a, b)?;
-                }
+                let detail = (content && a.kind == b'F' && b.kind == b'F')
+                    .then(|| content_diff(&name, a, b))
+                    .transpose()?;
+                changes.push(DiffChange {
+                    status: 'M',
+                    path: name,
+                    content: detail,
+                });
             }
             _ => {}
         }
     }
-    if changes == 0 {
+    if JSON_OUTPUT.load(Ordering::Relaxed) {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "skill": group.name,
+                "left": left.0,
+                "right": right.0,
+                "changes": changes,
+            }))?
+        );
+        return Ok(if changes.is_empty() {
+            EXIT_OK
+        } else {
+            EXIT_CONFLICTS
+        });
+    }
+    println!("{} ↔ {}", left.0, right.0);
+    for change in &changes {
+        println!("{} {}", change.status, change.path);
+        if let Some(content) = &change.content {
+            print!("{content}");
+        }
+    }
+    if changes.is_empty() {
         println!("{} Copies are identical.", style("✓").green());
         Ok(EXIT_OK)
     } else {
@@ -1602,22 +1994,19 @@ fn diff_group(group: &SkillGroup, content: bool) -> Result<u8> {
     }
 }
 
-fn print_content_diff(name: &str, left: &ManifestEntry, right: &ManifestEntry) -> Result<()> {
+fn content_diff(name: &str, left: &ManifestEntry, right: &ManifestEntry) -> Result<String> {
     let left_bytes = fs::read(&left.source)?;
     let right_bytes = fs::read(&right.source)?;
     match (
         std::str::from_utf8(&left_bytes),
         std::str::from_utf8(&right_bytes),
     ) {
-        (Ok(a), Ok(b)) => print!(
-            "{}",
-            TextDiff::from_lines(a, b)
-                .unified_diff()
-                .header(&format!("a/{name}"), &format!("b/{name}"))
-        ),
-        _ => println!("  (binary content differs)"),
+        (Ok(a), Ok(b)) => Ok(TextDiff::from_lines(a, b)
+            .unified_diff()
+            .header(&format!("a/{name}"), &format!("b/{name}"))
+            .to_string()),
+        _ => Ok("  (binary content differs)\n".to_string()),
     }
-    Ok(())
 }
 
 fn link_command(config: &Config, args: LinkArgs, dry_run: bool) -> Result<u8> {
@@ -1683,7 +2072,11 @@ fn link_command(config: &Config, args: LinkArgs, dry_run: bool) -> Result<u8> {
         println!("CREATE TARGET  {}", path.display());
     }
     for (link, target) in &links {
-        println!("LINK\n  {}\n    -> {}", link.display(), target.display());
+        println!(
+            "LINK\n  {}\n    -> {}",
+            link.display(),
+            managed_link_value(target, link, config.relative_links).display()
+        );
     }
     if dry_run {
         println!("Dry run; no files changed.");
@@ -1695,7 +2088,9 @@ fn link_command(config: &Config, args: LinkArgs, dry_run: bool) -> Result<u8> {
     }
     let mut created = Vec::new();
     for (link, target) in &links {
-        if let Err(error) = create_symlink(target, link).and_then(|_| verify_link(link, target)) {
+        if let Err(error) = create_managed_symlink(target, link, config.relative_links)
+            .and_then(|_| verify_link(link, target))
+        {
             for path in &created {
                 let _ = fs::remove_file(path);
             }
@@ -1707,6 +2102,28 @@ fn link_command(config: &Config, args: LinkArgs, dry_run: bool) -> Result<u8> {
         println!("{} {}", style("✓").green(), link.display());
     }
     Ok(EXIT_OK)
+}
+
+fn restore_command(config: &Config, dry_run: bool) -> Result<u8> {
+    let targets: Vec<String> = config
+        .targets
+        .iter()
+        .filter(|(_, target)| target.enabled)
+        .map(|(id, _)| id.clone())
+        .collect();
+    if targets.is_empty() {
+        bail!("no enabled targets were detected; add one with `si targets add`");
+    }
+    link_command(
+        config,
+        LinkArgs {
+            skill: None,
+            targets: Vec::new(),
+            all: true,
+            target: targets,
+        },
+        dry_run,
+    )
 }
 
 fn canonical_skill_names(root: &Path) -> Result<Vec<String>> {
@@ -1778,6 +2195,10 @@ fn targets_command(
 ) -> Result<u8> {
     match command {
         None => {
+            if JSON_OUTPUT.load(Ordering::Relaxed) {
+                println!("{}", serde_json::to_string_pretty(&config.targets)?);
+                return Ok(EXIT_OK);
+            }
             println!("TARGET       PATH                                      STATUS");
             for (id, target) in &config.targets {
                 let status = if !target.enabled {
@@ -1844,7 +2265,13 @@ fn validate_target_id(id: &str) -> Result<()> {
 
 fn config_command(mut config: Config, command: Option<ConfigCommand>, dry_run: bool) -> Result<u8> {
     match command {
-        None => print!("{}", toml::to_string_pretty(&config)?),
+        None => {
+            if JSON_OUTPUT.load(Ordering::Relaxed) {
+                println!("{}", serde_json::to_string_pretty(&config)?);
+            } else {
+                print!("{}", toml::to_string_pretty(&config)?);
+            }
+        }
         Some(ConfigCommand::SetRoot { root }) => {
             let new_root = absolute_path(&root)?;
             if new_root == config.root {
@@ -1875,6 +2302,45 @@ fn config_command(mut config: Config, command: Option<ConfigCommand>, dry_run: b
                 fs::create_dir_all(&new_root)?;
                 config.save()?;
                 println!("{} Canonical root updated", style("✓").green());
+            } else {
+                println!("Dry run; no files changed.");
+            }
+        }
+        Some(ConfigCommand::SetRelativeLinks { enabled }) => {
+            println!("SET RELATIVE LINKS  {enabled}");
+            config.relative_links = enabled;
+            if !dry_run {
+                config.save()?;
+                println!(
+                    "{} Link style updated; existing links are unchanged",
+                    style("✓").green()
+                );
+            } else {
+                println!("Dry run; no files changed.");
+            }
+        }
+        Some(ConfigCommand::AddIgnore { pattern }) => {
+            build_ignore_set(std::slice::from_ref(&pattern))?;
+            if config.ignore.contains(&pattern) {
+                bail!("ignore pattern already exists: {pattern}");
+            }
+            println!("ADD IGNORE  {pattern}");
+            config.ignore.push(pattern);
+            if !dry_run {
+                config.save()?;
+            } else {
+                println!("Dry run; no files changed.");
+            }
+        }
+        Some(ConfigCommand::RemoveIgnore { pattern }) => {
+            let before = config.ignore.len();
+            config.ignore.retain(|item| item != &pattern);
+            if config.ignore.len() == before {
+                bail!("ignore pattern not found: {pattern}");
+            }
+            println!("REMOVE IGNORE  {pattern}");
+            if !dry_run {
+                config.save()?;
             } else {
                 println!("Dry run; no files changed.");
             }
@@ -1913,7 +2379,15 @@ mod tests {
                 },
             ),
         ]);
-        (temp, Config { root, targets })
+        (
+            temp,
+            Config {
+                root,
+                targets,
+                relative_links: false,
+                ignore: Vec::new(),
+            },
+        )
     }
 
     fn skill(path: &Path, body: &str) {
@@ -1951,6 +2425,30 @@ mod tests {
         fs::remove_file(two.join("alias")).unwrap();
         std::os::unix::fs::symlink("references/note.md", two.join("alias")).unwrap();
         assert_ne!(fingerprint(&one).unwrap(), fingerprint(&two).unwrap());
+    }
+
+    #[test]
+    fn custom_ignore_patterns_exclude_matching_content() {
+        let (temp, _) = fixture();
+        let one = temp.path().join("one");
+        let two = temp.path().join("two");
+        skill(&one, "same");
+        skill(&two, "same");
+        fs::write(one.join("generated.log"), "one").unwrap();
+        fs::write(two.join("generated.log"), "two").unwrap();
+        assert_ne!(fingerprint(&one).unwrap(), fingerprint(&two).unwrap());
+        let ignore = vec!["*.log".to_string()];
+        assert_eq!(
+            fingerprint_with_ignores(&one, &ignore).unwrap(),
+            fingerprint_with_ignores(&two, &ignore).unwrap()
+        );
+    }
+
+    #[test]
+    fn old_configs_receive_v02_defaults() {
+        let config: Config = toml::from_str("root = '/tmp/skills'\n").unwrap();
+        assert!(!config.relative_links);
+        assert!(config.ignore.is_empty());
     }
 
     #[test]
@@ -1999,6 +2497,27 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn adoption_can_create_relative_managed_links() {
+        let (_temp, mut config) = fixture();
+        config.relative_links = true;
+        let original = config.targets["claude"].path.join("foo");
+        skill(&original, "same");
+        let plan = plan_new(
+            &config,
+            "foo",
+            "foo",
+            fingerprint(&original).unwrap(),
+            vec![original.clone()],
+        )
+        .unwrap();
+        execute_adoption(&plan).unwrap();
+        let raw = fs::read_link(&original).unwrap();
+        assert!(raw.is_relative());
+        verify_link(&original, &config.root.join("foo")).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn managed_foreign_and_broken_links_are_distinguished() {
         let (_temp, config) = fixture();
         let canonical = config.root.join("foo");
@@ -2027,6 +2546,19 @@ mod tests {
         );
         assert_eq!(
             result.groups["missing"].installations[0].kind,
+            InstallationKind::BrokenSymlink
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_loops_are_reported_as_broken_without_recursing() {
+        let (_temp, config) = fixture();
+        let loop_path = config.targets["claude"].path.join("loop");
+        std::os::unix::fs::symlink(&loop_path, &loop_path).unwrap();
+        let result = scan(&config).unwrap();
+        assert_eq!(
+            result.groups["loop"].installations[0].kind,
             InstallationKind::BrokenSymlink
         );
     }
@@ -2107,8 +2639,31 @@ mod tests {
         assert!(!config.root.join("foo").exists());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn cross_filesystem_copy_path_preserves_permissions_and_timestamps() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let destination = temp.path().join("destination");
+        skill(&source, "body");
+        let script = source.join("run.sh");
+        fs::write(&script, "#!/bin/sh\n").unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o751)).unwrap();
+        let timestamp = filetime::FileTime::from_unix_time(1_700_000_000, 0);
+        filetime::set_file_mtime(&script, timestamp).unwrap();
+        copy_skill(&source, &destination).unwrap();
+        let copied = fs::metadata(destination.join("run.sh")).unwrap();
+        assert_eq!(copied.permissions().mode() & 0o777, 0o751);
+        assert_eq!(
+            filetime::FileTime::from_last_modification_time(&copied),
+            timestamp
+        );
+    }
+
     #[test]
     fn clap_accepts_the_documented_link_forms() {
+        cli::command().debug_assert();
         let direct = Cli::try_parse_from(["si", "link", "foo", "claude", "codex"]).unwrap();
         assert!(matches!(
             direct.command,

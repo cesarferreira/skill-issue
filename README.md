@@ -25,7 +25,7 @@ Requires [Rust](https://rustup.rs) **1.85+** and `~/.cargo/bin` on your `PATH`.
 Download a binary from the [latest GitHub release](https://github.com/cesarferreira/skill-issue/releases/latest), or install directly from source:
 
 ```bash
-cargo install --git https://github.com/cesarferreira/skill-issue.git --locked
+cargo install --git https://github.com/cesarferreira/skill-issue.git --tag v0.2.0 --locked
 ```
 
 Verify:
@@ -33,32 +33,6 @@ Verify:
 ```bash
 si --help
 ```
-
-<details>
-<summary><strong>Build from source</strong> — for development or unreleased changes</summary>
-
-```bash
-git clone https://github.com/cesarferreira/skill-issue.git
-cd skill-issue
-cargo install --path . --locked
-# or
-make install-release
-```
-
-Debug install (faster compile, larger binary):
-
-```bash
-make install
-```
-
-Run without installing:
-
-```bash
-make build-release
-./target/release/si
-```
-
-</details>
 
 <a id="quickstart"></a>
 ## Quickstart
@@ -97,7 +71,40 @@ si unlink rust-cli codex
 ```
 
 Every mutating command supports `--dry-run`. Colour is disabled by `NO_COLOR`
-or `--no-color`.
+or `--no-color`. After reviewing a plan, `--yes` allows safe non-interactive
+execution; divergent copies still require an interactive choice.
+
+## More workflows
+
+Include project-local Claude and `.agents` skills, optionally as JSON:
+
+```bash
+si scan --project .
+si scan --project . --json
+```
+
+Inspect Git backup health and restore a freshly cloned canonical directory:
+
+```bash
+si status --git
+si restore --dry-run
+si restore
+```
+
+Configure portable relative links and exclude generated content from
+fingerprints:
+
+```bash
+si config set-relative-links true
+si config add-ignore '*.log'
+si config remove-ignore '*.log'
+```
+
+Generate completions for Bash, Zsh, Fish, Elvish, or PowerShell:
+
+```bash
+si completions zsh > ~/.zfunc/_si
+```
 
 ## License
 
