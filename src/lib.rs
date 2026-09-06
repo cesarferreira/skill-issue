@@ -33,8 +33,21 @@ struct AdoptionPlan {
     display_name: String,
     canonical: PathBuf,
     fingerprint: String,
-    installations: Vec<PathBuf>,
-    source: Option<PathBuf>,
+    transfer: CanonicalTransfer,
+    replacements: Vec<Replacement>,
+}
+
+#[derive(Clone, Debug)]
+enum CanonicalTransfer {
+    Existing,
+    Move { source: PathBuf },
+    Copy { source: PathBuf, temporary: PathBuf },
+}
+
+#[derive(Clone, Debug)]
+struct Replacement {
+    original: PathBuf,
+    backup: Option<PathBuf>,
 }
 
 pub fn run(cli: Cli) -> Result<u8> {
@@ -822,18 +835,23 @@ fn plans_for_group(config: &Config, group: &SkillGroup, tty: bool) -> Result<Vec
         let options = [
             "Use the existing canonical version where copies match",
             "Keep all physical versions under separate names",
+            "View content diff",
             "Skip",
         ];
         match Select::with_theme(&ColorfulTheme::default())
             .with_prompt(format!("{} has divergent copies", group.name))
             .items(options)
-            .default(2)
+            .default(3)
             .interact()?
         {
             0 => Ok(plan_existing(&group.name, canonical, matching)
                 .into_iter()
                 .collect()),
             1 => plans_keep_both(config, group, &physical_by_fp, Some(&canonical.fingerprint)),
+            2 => {
+                diff_group(group, true)?;
+                plans_for_group(config, group, tty)
+            }
             _ => Ok(Vec::new()),
         }
     } else if physical_by_fp.len() == 1 {
@@ -868,6 +886,7 @@ fn plans_for_group(config: &Config, group: &SkillGroup, tty: bool) -> Result<Vec
             })
             .collect();
         labels.push("Keep all versions under separate names".to_string());
+        labels.push("View content diff".to_string());
         labels.push("Skip".to_string());
         let choice = Select::with_theme(&ColorfulTheme::default())
             .with_prompt(format!("{} has divergent copies", group.name))
@@ -885,6 +904,9 @@ fn plans_for_group(config: &Config, group: &SkillGroup, tty: bool) -> Result<Vec
             )?])
         } else if choice == versions.len() {
             plans_keep_both(config, group, &physical_by_fp, None)
+        } else if choice == versions.len() + 1 {
+            diff_group(group, true)?;
+            plans_for_group(config, group, tty)
         } else {
             Ok(Vec::new())
         }
@@ -920,8 +942,14 @@ fn plan_existing(
         display_name: name.to_string(),
         canonical: canonical.path.clone(),
         fingerprint: canonical.fingerprint.clone(),
-        installations,
-        source: None,
+        transfer: CanonicalTransfer::Existing,
+        replacements: installations
+            .into_iter()
+            .map(|original| Replacement {
+                backup: Some(unique_sibling(&original, "backup")),
+                original,
+            })
+            .collect(),
     })
 }
 
@@ -950,13 +978,46 @@ fn plan_new(
         .first()
         .cloned()
         .ok_or_else(|| anyhow!("no physical source for {display_name}"))?;
+    let transfer = if same_filesystem(&source, &config.root) {
+        CanonicalTransfer::Move {
+            source: source.clone(),
+        }
+    } else {
+        CanonicalTransfer::Copy {
+            source: source.clone(),
+            temporary: unique_sibling(&canonical, "tmp"),
+        }
+    };
+    let moves_source = matches!(transfer, CanonicalTransfer::Move { .. });
+    let replacements = installations
+        .into_iter()
+        .map(|original| Replacement {
+            backup: (!(moves_source && original == source))
+                .then(|| unique_sibling(&original, "backup")),
+            original,
+        })
+        .collect();
     Ok(AdoptionPlan {
         display_name: display_name.to_string(),
         canonical,
         fingerprint,
-        installations,
-        source: Some(source),
+        transfer,
+        replacements,
     })
+}
+
+#[cfg(unix)]
+fn same_filesystem(source: &Path, destination_directory: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (fs::metadata(source), fs::metadata(destination_directory)) {
+        (Ok(source), Ok(destination)) => source.dev() == destination.dev(),
+        _ => false,
+    }
+}
+
+#[cfg(not(unix))]
+fn same_filesystem(_source: &Path, _destination_directory: &Path) -> bool {
+    false
 }
 
 fn plans_keep_both(
@@ -1020,21 +1081,51 @@ fn validate_skill_name(name: &str) -> Result<()> {
 fn render_adoption_plans(plans: &[AdoptionPlan]) {
     println!("{}", Style::new().bold().apply_to("PLAN"));
     for plan in plans {
-        if let Some(source) = &plan.source {
+        match &plan.transfer {
+            CanonicalTransfer::Existing => {}
+            CanonicalTransfer::Move { source } => {
+                println!(
+                    "MOVE\n  {}\n    -> {}",
+                    source.display(),
+                    plan.canonical.display()
+                );
+            }
+            CanonicalTransfer::Copy { source, temporary } => {
+                println!(
+                    "COPY\n  {}\n    -> {}",
+                    source.display(),
+                    temporary.display()
+                );
+                println!("VERIFY  {}", temporary.display());
+                println!(
+                    "MOVE\n  {}\n    -> {}",
+                    temporary.display(),
+                    plan.canonical.display()
+                );
+            }
+        }
+        for replacement in &plan.replacements {
+            if let Some(backup) = &replacement.backup {
+                println!(
+                    "STAGE\n  {}\n    -> {}",
+                    replacement.original.display(),
+                    backup.display()
+                );
+            }
             println!(
-                "COPY\n  {}\n    -> {}",
-                source.display(),
+                "LINK\n  {}\n    -> {}",
+                replacement.original.display(),
                 plan.canonical.display()
             );
-        }
-        println!("REPLACE WITH LINKS");
-        for path in &plan.installations {
-            println!("  {}\n    -> {}", path.display(), plan.canonical.display());
+            println!("VERIFY  {}", replacement.original.display());
+            if let Some(backup) = &replacement.backup {
+                println!("REMOVE  {}", backup.display());
+            }
         }
     }
     println!(
         "{} locations affected.",
-        plans.iter().map(|p| p.installations.len()).sum::<usize>()
+        plans.iter().map(|p| p.replacements.len()).sum::<usize>()
     );
 }
 
@@ -1044,42 +1135,70 @@ fn execute_adoption(plan: &AdoptionPlan) -> Result<()> {
             .parent()
             .ok_or_else(|| anyhow!("invalid canonical path"))?,
     )?;
-    let created_canonical = plan.source.is_some();
-    if let Some(source) = &plan.source {
-        let temp = unique_sibling(&plan.canonical, "tmp");
-        if let Err(error) = copy_skill(source, &temp).and_then(|_| {
-            let actual = fingerprint(&temp)?;
-            if actual != plan.fingerprint {
-                bail!("verification failed while copying {}", source.display());
-            }
-            fs::rename(&temp, &plan.canonical)?;
-            Ok(())
-        }) {
-            let _ = fs::remove_dir_all(&temp);
-            return Err(error)
-                .with_context(|| format!("create canonical skill {}", plan.canonical.display()));
+    let created_canonical = !matches!(plan.transfer, CanonicalTransfer::Existing);
+    let moved_source = match &plan.transfer {
+        CanonicalTransfer::Existing => None,
+        CanonicalTransfer::Move { source } => {
+            fs::rename(source, &plan.canonical).with_context(|| {
+                format!("move {} to {}", source.display(), plan.canonical.display())
+            })?;
+            Some(source.clone())
         }
+        CanonicalTransfer::Copy { source, temporary } => {
+            if let Err(error) = copy_skill(source, temporary).and_then(|_| {
+                let actual = fingerprint(temporary)?;
+                if actual != plan.fingerprint {
+                    bail!("verification failed while copying {}", source.display());
+                }
+                fs::rename(temporary, &plan.canonical)?;
+                Ok(())
+            }) {
+                let _ = fs::remove_dir_all(temporary);
+                return Err(error).with_context(|| {
+                    format!("create canonical skill {}", plan.canonical.display())
+                });
+            }
+            None
+        }
+    };
+    if fingerprint(&plan.canonical)? != plan.fingerprint {
+        if let Some(source) = &moved_source {
+            let _ = fs::rename(&plan.canonical, source);
+        } else if created_canonical {
+            let _ = fs::remove_dir_all(&plan.canonical);
+        }
+        bail!(
+            "canonical verification failed for {}",
+            plan.canonical.display()
+        );
     }
     let mut staged = Vec::<(PathBuf, PathBuf)>::new();
+    let mut created_links = Vec::<PathBuf>::new();
     let operation = (|| -> Result<()> {
-        for original in &plan.installations {
-            let backup = unique_sibling(original, "backup");
-            fs::rename(original, &backup)
-                .with_context(|| format!("stage {}", original.display()))?;
-            staged.push((original.clone(), backup));
-            create_symlink(&plan.canonical, original)?;
-            verify_link(original, &plan.canonical)?;
+        for replacement in &plan.replacements {
+            if let Some(backup) = &replacement.backup {
+                fs::rename(&replacement.original, backup)
+                    .with_context(|| format!("stage {}", replacement.original.display()))?;
+                staged.push((replacement.original.clone(), backup.clone()));
+            }
+            create_symlink(&plan.canonical, &replacement.original)?;
+            created_links.push(replacement.original.clone());
+            verify_link(&replacement.original, &plan.canonical)?;
         }
         Ok(())
     })();
     if let Err(error) = operation {
-        for (original, backup) in staged.iter().rev() {
-            if fs::symlink_metadata(original).is_ok() {
-                let _ = fs::remove_file(original);
+        for link in created_links.iter().rev() {
+            if fs::symlink_metadata(link).is_ok() {
+                let _ = fs::remove_file(link);
             }
+        }
+        for (original, backup) in staged.iter().rev() {
             let _ = fs::rename(backup, original);
         }
-        if created_canonical {
+        if let Some(source) = &moved_source {
+            let _ = fs::rename(&plan.canonical, source);
+        } else if created_canonical {
             let _ = fs::remove_dir_all(&plan.canonical);
         }
         return Err(error).context("migration rolled back");
@@ -1109,12 +1228,14 @@ fn unique_sibling(path: &Path, purpose: &str) -> PathBuf {
 
 fn copy_skill(source: &Path, destination: &Path) -> Result<()> {
     fs::create_dir(destination)?;
+    let mut directories = vec![(source.to_path_buf(), destination.to_path_buf())];
     for entry in WalkDir::new(source).follow_links(false).min_depth(1) {
         let entry = entry?;
         let relative = entry.path().strip_prefix(source)?;
         let output = destination.join(relative);
         if entry.file_type().is_dir() {
             fs::create_dir(&output)?;
+            directories.push((entry.path().to_path_buf(), output));
         } else if entry.file_type().is_file() {
             fs::copy(entry.path(), &output)?;
         } else if entry.file_type().is_symlink() {
@@ -1122,6 +1243,9 @@ fn copy_skill(source: &Path, destination: &Path) -> Result<()> {
         } else {
             bail!("unsupported special file: {}", entry.path().display());
         }
+    }
+    for (input, output) in directories.into_iter().rev() {
+        fs::set_permissions(output, fs::metadata(input)?.permissions())?;
     }
     Ok(())
 }
@@ -1182,7 +1306,15 @@ fn doctor_command(config: &Config, fix: bool, dry_run: bool) -> Result<u8> {
             }
         );
     }
-    let mut issue_count = usize::from(!root_ok) + result.missing_targets.len();
+    let recovery = recovery_artifacts(config)?;
+    let mut issue_count = usize::from(!root_ok) + result.missing_targets.len() + recovery.len();
+    for path in &recovery {
+        println!(
+            "{} Recovery artifact from an interrupted migration: {}",
+            style("⚠").yellow(),
+            path.display()
+        );
+    }
     for group in result.groups.values() {
         for installation in &group.installations {
             match installation.kind {
@@ -1301,6 +1433,26 @@ fn doctor_command(config: &Config, fix: bool, dry_run: bool) -> Result<u8> {
     Ok(result_exit(&after))
 }
 
+fn recovery_artifacts(config: &Config) -> Result<Vec<PathBuf>> {
+    let mut artifacts = Vec::new();
+    let locations = std::iter::once(&config.root).chain(
+        config
+            .targets
+            .values()
+            .filter(|target| target.enabled)
+            .map(|target| &target.path),
+    );
+    for location in locations.filter(|path| path.is_dir()) {
+        for entry in sorted_children(location)? {
+            let name = entry.file_name();
+            if name.to_string_lossy().starts_with(".skillissue-") {
+                artifacts.push(entry.path());
+            }
+        }
+    }
+    Ok(artifacts)
+}
+
 fn require_confirmation(prompt: &str) -> Result<()> {
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         bail!("this mutation requires an interactive confirmation; use --dry-run to inspect it");
@@ -1379,6 +1531,10 @@ fn diff_command(config: &Config, skill: &str, content: bool) -> Result<u8> {
         .groups
         .get(skill)
         .ok_or_else(|| anyhow!("skill `{skill}` was not found"))?;
+    diff_group(group, content)
+}
+
+fn diff_group(group: &SkillGroup, content: bool) -> Result<u8> {
     let mut copies = Vec::<(String, PathBuf, String)>::new();
     if let Some(canonical) = &group.canonical {
         copies.push((
@@ -1397,7 +1553,7 @@ fn diff_command(config: &Config, skill: &str, content: bool) -> Result<u8> {
         }
     }
     if copies.len() < 2 {
-        bail!("`{skill}` has only one readable copy");
+        bail!("`{}` has only one readable copy", group.name);
     }
     let first = 0;
     let second = copies
