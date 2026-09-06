@@ -57,7 +57,7 @@ fn divergent_interactive_flow_can_diff_choose_and_preserve() {
     assert!(root.join("android").is_dir());
     assert!(claude.join("android").is_symlink());
     assert!(codex.join("android").is_symlink());
-    let migration_root = cache.join("skillissue/migrations");
+    let migration_root = cache.join("skill-issue/migrations");
     let timestamp = fs::read_dir(migration_root)
         .unwrap()
         .next()
@@ -183,12 +183,40 @@ fn bootstrap_link_all_asks_once_and_uses_every_detected_agent() {
         .args(["link", "--all", "--no-color"]);
     let mut session = Session::spawn(command).unwrap();
     session.set_expect_timeout(Some(Duration::from_secs(10)));
-    session.expect("Detected:").unwrap();
+    session.expect("DETECTED").unwrap();
     session
         .expect("Link 2 skills into all detected agents?")
         .unwrap();
     session.send_line("").unwrap();
     session.expect("4 links created").unwrap();
     session.expect("No skill issues").unwrap();
+    session.expect(Eof).unwrap();
+}
+
+#[test]
+fn tui_launches_renders_skills_and_quits_cleanly() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("root");
+    let claude = temp.path().join("claude");
+    skill(&root.join("rust-cli"), "canonical\n");
+    fs::create_dir_all(&claude).unwrap();
+    let config = temp.path().join("config.toml");
+    fs::write(
+        &config,
+        format!(
+            "root = {:?}\n\n[targets.claude]\npath = {:?}\nenabled = true\n",
+            root, claude
+        ),
+    )
+    .unwrap();
+    let mut command = Command::new(cargo_bin("si"));
+    command
+        .env("SKILLISSUE_CONFIG", &config)
+        .args(["tui", "--no-color"]);
+    let mut session = Session::spawn(command).unwrap();
+    session.set_expect_timeout(Some(Duration::from_secs(10)));
+    session.expect("skill-issue").unwrap();
+    session.expect("rust-cli").unwrap();
+    session.send("q").unwrap();
     session.expect(Eof).unwrap();
 }
