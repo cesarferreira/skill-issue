@@ -8,8 +8,9 @@ that canonical directory.
 
 The product supports two primary journeys:
 
-1. On the first computer, collect skills scattered across installed agents into
-   one canonical directory and replace the original copies with symlinks.
+1. On the first computer, configure a canonical directory, then use `sync` to
+   collect skills scattered across installed agents and replace original copies
+   with symlinks.
 2. On another computer, clone or pull that canonical Git repository and apply
    its skills to the locally installed agents.
 
@@ -56,8 +57,8 @@ capabilities remain in scope.
 
 ## `si setup [SKILLS_DIR]`
 
-`setup` is the only onboarding and collection workflow. It can safely be run
-again when a user installs another agent or accumulates new physical skills.
+`setup` is the onboarding workflow. It configures the canonical root and
+discovers local agent targets; later skill changes use `sync`.
 
 ### Configuration
 
@@ -75,53 +76,23 @@ merges them into the configured target set without removing custom or
 previously configured targets. Machine-specific target configuration remains
 outside the canonical Git repository.
 
-### Discovery and planning
+### Configuration only
 
-Setup scans the canonical directory and every enabled target. It considers all
-physical skill directories, including unique skills, not only duplicated
-names.
-
-It first collects any required conflict decisions without changing the
-filesystem. It then builds and renders one aggregate operation plan covering
-all selected skills and targets. A single confirmation applies the plan.
-
-The plan may:
-
-- move a unique physical skill into the canonical directory;
-- select one of several identical copies as the canonical copy;
-- replace identical physical copies with managed symlinks;
-- create links for canonical skills missing from enabled targets;
-- preserve divergent versions under distinct user-approved names;
-- create configured target directories needed by planned links.
-
-`--dry-run` renders the same aggregate plan without writing configuration,
-creating directories, moving files, or creating links. `--yes` skips the final
-confirmation but never selects a resolution for divergent content.
-
-### Existing canonical content
-
-If the canonical directory already contains skills, as after `git clone`, setup
-treats those directories as authoritative candidates and primarily creates
-local agent links.
-
-When a target contains a physical directory with the same name:
-
-- identical content may be replaced by a managed symlink;
-- divergent content requires an interactive decision;
-- a foreign symlink is preserved and reported;
-- an unsafe or ambiguous case does not get overwritten.
-
-Setup finishes by rescanning and reporting whether the machine is healthy.
+Setup does not move skills or create links. It stores the canonical root and
+enabled target configuration, then directs the user to `si sync`. `--dry-run`
+validates and previews configuration without writing it.
 
 ## `si sync`
 
-`sync` reconciles the canonical directory with the configured agent targets.
-It is the command users run after `git clone`, `git pull`, or manual changes to
-the canonical directory. It does not fetch, pull, commit, or push Git data.
+`sync` discovers physical skills in configured agent targets, collects safe
+candidates into the canonical directory, then reconciles links. It is the
+command users run after installation, `git pull`, or manual changes to the
+canonical directory. It does not fetch, pull, commit, or push Git data.
 
 Sync builds a deterministic plan that may:
 
 - create missing configured target directories;
+- move a unique physical skill into the canonical directory;
 - create missing links for every canonical skill in every enabled target;
 - repair broken managed links when the canonical skill exists;
 - replace a physical directory when its content is identical to the canonical
@@ -137,10 +108,10 @@ Sync must preserve and report:
 - foreign symlinks;
 - paths whose ownership cannot be established;
 - physical directories that exist only in a target and have not been collected
-  with `si setup`.
+  because they diverge from another copy.
 
-If any preserved conflict prevents a requested link, apply returns the
-documented issues exit code and recommends `si diff <skill>` or `si setup`.
+If any preserved conflict prevents a requested link, sync returns the
+documented issues exit code and recommends `si diff <skill>`.
 
 Sync shows its full plan before mutation, supports `--dry-run` and `--yes`,
 executes transactionally, verifies every resulting link, and reports the final
