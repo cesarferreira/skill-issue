@@ -54,6 +54,34 @@ git -C ~/code/skills pull
 si apply
 ```
 
+## Everyday changes
+
+`si apply` reconciles links after any change to the canonical directory, whether
+the change came from Git or from you editing it directly.
+
+Delete a canonical skill, then remove its stale managed links everywhere:
+
+```bash
+rm -rf ~/skills/old-skill
+si apply
+```
+
+Add new skill directories to `~/skills` and run the same command. It creates
+their links in every configured agent while removing links for any skills you
+deleted:
+
+```bash
+si apply
+```
+
+If a new skill is installed directly into an agent directory, collect it with
+`setup`. It shows a plan, moves the physical copy into the canonical directory,
+and links it back to its original agent directory:
+
+```bash
+si setup
+```
+
 ## Everyday commands
 
 | Command | What it does |
