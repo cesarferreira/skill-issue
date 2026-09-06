@@ -13,6 +13,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use walkdir::{DirEntry, WalkDir};
 
+mod apply;
 mod cli;
 mod model;
 mod theme;
@@ -125,6 +126,7 @@ pub fn run(cli: Cli) -> Result<u8> {
                 Command::Adopt { skill } => {
                     adopt_command(&config, skill.as_deref(), cli.dry_run, true)
                 }
+                Command::Apply => apply::run(&config, cli.dry_run),
                 Command::Status { git } => status_command(&config, git),
                 Command::Doctor { fix } => doctor_command(&config, fix, cli.dry_run),
                 Command::Diff { skill, content } => diff_command(&config, &skill, content),
