@@ -1,6 +1,6 @@
 use super::{
-    Config, InstallationKind, ScanResult, SkillGroup, SkillStatus, SkillTogglePlan,
-    config_with_project, plan_skill_toggle, scan,
+    Config, InstallationKind, ScanResult, SkillDeletePlan, SkillGroup, SkillStatus,
+    SkillTogglePlan, config_with_project, plan_skill_delete, plan_skill_toggle, scan,
 };
 use anyhow::{Result, bail};
 use crossterm::{
@@ -103,6 +103,7 @@ enum Mode {
     Filter,
     Help,
     Confirm(SkillTogglePlan),
+    ConfirmDelete(SkillDeletePlan),
     Notice,
 }
 
@@ -169,6 +170,9 @@ impl App {
             Mode::Confirm(_) => {
                 return self.handle_confirmation(key);
             }
+            Mode::ConfirmDelete(_) => {
+                return self.handle_delete_confirmation(key);
+            }
             Mode::Browse => {}
         }
 
@@ -183,6 +187,7 @@ impl App {
             KeyCode::Char('/') if self.view == View::Skills => self.mode = Mode::Filter,
             KeyCode::Char('r') => self.refresh()?,
             KeyCode::Char('d') if self.view == View::Skills => self.prepare_toggle()?,
+            KeyCode::Char('D') if self.view == View::Skills => self.prepare_delete()?,
             KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
             KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
             KeyCode::Home => self.select_edge(false),
@@ -250,6 +255,33 @@ impl App {
         Ok(())
     }
 
+    fn handle_delete_confirmation(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Enter => {
+                let Mode::ConfirmDelete(plan) = std::mem::replace(&mut self.mode, Mode::Browse)
+                else {
+                    return Ok(());
+                };
+                if self.dry_run {
+                    self.notice = format!(
+                        "Dry run: {} would be permanently deleted ({} link{} removed).",
+                        plan.skill,
+                        plan.link_count(),
+                        if plan.link_count() == 1 { "" } else { "s" }
+                    );
+                } else {
+                    plan.apply()?;
+                    self.notice = format!("{} was permanently deleted.", plan.skill);
+                    self.refresh()?;
+                }
+                self.mode = Mode::Notice;
+            }
+            KeyCode::Char('n') | KeyCode::Esc => self.mode = Mode::Browse,
+            _ => {}
+        }
+        Ok(())
+    }
+
     fn refresh(&mut self) -> Result<()> {
         self.result = scan(&self.config)?;
         self.normalize_skill_selection();
@@ -284,6 +316,27 @@ impl App {
                 self.mode = Mode::Notice;
             }
             Ok(plan) => self.mode = Mode::Confirm(plan),
+            Err(error) => {
+                self.notice = format!("{error:#}");
+                self.mode = Mode::Notice;
+            }
+        }
+        Ok(())
+    }
+
+    fn prepare_delete(&mut self) -> Result<()> {
+        let Some(group) = self.selected_skill() else {
+            self.notice = "No canonical skill selected.".to_string();
+            self.mode = Mode::Notice;
+            return Ok(());
+        };
+        if group.canonical.is_none() {
+            self.notice = format!("{} is not canonical yet; nothing to delete.", group.name);
+            self.mode = Mode::Notice;
+            return Ok(());
+        }
+        match plan_skill_delete(&self.config, &group.name) {
+            Ok(plan) => self.mode = Mode::ConfirmDelete(plan),
             Err(error) => {
                 self.notice = format!("{error:#}");
                 self.mode = Mode::Notice;
@@ -719,19 +772,19 @@ impl App {
         } else {
             vec![Line::from(vec![
                 Span::styled(" ↑↓/jk ", self.pill(MUTED)),
-                Span::raw(" navigate  "),
+                Span::styled(" navigate  ", self.style(Color::White)),
                 Span::styled(" Tab ", self.pill(BRAND)),
-                Span::raw(" views  "),
+                Span::styled(" views  ", self.style(Color::White)),
                 Span::styled(" / ", self.pill(ACCENT)),
-                Span::raw(" filter  "),
+                Span::styled(" filter  ", self.style(Color::White)),
                 Span::styled(" d ", self.pill(WARN)),
-                Span::raw(" enable/disable  "),
+                Span::styled(" enable/disable  ", self.style(Color::White)),
                 Span::styled(" r ", self.pill(GOOD)),
-                Span::raw(" refresh  "),
+                Span::styled(" refresh  ", self.style(Color::White)),
                 Span::styled(" ? ", self.pill(MUTED)),
-                Span::raw(" help  "),
+                Span::styled(" help  ", self.style(Color::White)),
                 Span::styled(" q ", self.pill(BAD)),
-                Span::raw(" quit"),
+                Span::styled(" quit", self.style(Color::White)),
             ])]
         };
         frame.render_widget(
@@ -759,10 +812,16 @@ impl App {
                     Line::raw("d            Enable or disable the selected skill"),
                     Line::raw("             (always previews and confirms first)"),
                     Line::raw(""),
+                    Line::styled(
+                        "D            Permanently delete the selected skill",
+                        self.style(BAD),
+                    ),
+                    Line::raw("             (removes every link and the canonical copy)"),
+                    Line::raw(""),
                     Line::styled("Press any key to close", self.style(MUTED)),
                 ],
                 62,
-                16,
+                19,
             ),
             Mode::Confirm(plan) => {
                 let action = if plan.enable { "ENABLE" } else { "DISABLE" };
@@ -807,6 +866,51 @@ impl App {
                     self.style(ACCENT),
                 ));
                 (" Confirm action ", lines, 72, 15)
+            }
+            Mode::ConfirmDelete(plan) => {
+                let mut lines = vec![
+                    Line::styled(
+                        format!("DELETE {}", plan.skill),
+                        self.style(BAD).add_modifier(Modifier::BOLD),
+                    ),
+                    Line::raw(""),
+                    Line::raw(format!(
+                        "{} link{} and the canonical copy will be removed.",
+                        plan.link_count(),
+                        if plan.link_count() == 1 { "" } else { "s" }
+                    )),
+                ];
+                for path in plan.links().take(5) {
+                    lines.push(Line::styled(
+                        format!("  {}", path.display()),
+                        self.style(MUTED),
+                    ));
+                }
+                if plan.link_count() > 5 {
+                    lines.push(Line::styled(
+                        format!("  … and {} more", plan.link_count() - 5),
+                        self.style(MUTED),
+                    ));
+                }
+                lines.push(Line::styled(
+                    format!("  {}", plan.canonical().display()),
+                    self.style(MUTED),
+                ));
+                lines.push(Line::raw(""));
+                lines.push(Line::styled(
+                    if self.dry_run {
+                        "DRY RUN — no files will change"
+                    } else {
+                        "This cannot be undone."
+                    },
+                    self.style(BAD),
+                ));
+                lines.push(Line::raw(""));
+                lines.push(Line::styled(
+                    "Enter/y confirm  ·  n/Esc cancel",
+                    self.style(ACCENT),
+                ));
+                (" Confirm delete ", lines, 72, 16)
             }
             Mode::Notice => (
                 " skill-issue ",

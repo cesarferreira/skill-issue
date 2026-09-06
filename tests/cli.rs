@@ -423,6 +423,72 @@ fn toggles_reject_missing_canonical_skills() {
         .stderr(predicate::str::contains("canonical skill does not exist"));
 }
 
+#[cfg(unix)]
+#[test]
+fn delete_removes_links_and_the_canonical_skill() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("root");
+    let claude = temp.path().join("claude");
+    let codex = temp.path().join("codex");
+    skill(&root.join("foo"), "body");
+    fs::create_dir_all(&claude).unwrap();
+    fs::create_dir_all(&codex).unwrap();
+    std::os::unix::fs::symlink(root.join("foo"), claude.join("foo")).unwrap();
+    std::os::unix::fs::symlink(root.join("foo"), codex.join("foo")).unwrap();
+    let config = temp.path().join("config.toml");
+    write_config(&config, &root, &[("claude", &claude), ("codex", &codex)]);
+
+    cargo_bin_cmd!("si")
+        .env("SKILLISSUE_CONFIG", &config)
+        .args(["delete", "foo", "--yes", "--no-color"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Deleted"));
+    assert!(!claude.join("foo").exists());
+    assert!(!codex.join("foo").exists());
+    assert!(!root.join("foo").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn delete_dry_run_previews_without_removing_anything() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("root");
+    let target = temp.path().join("target");
+    skill(&root.join("foo"), "body");
+    fs::create_dir_all(&target).unwrap();
+    std::os::unix::fs::symlink(root.join("foo"), target.join("foo")).unwrap();
+    let config = temp.path().join("config.toml");
+    write_config(&config, &root, &[("agent", &target)]);
+
+    cargo_bin_cmd!("si")
+        .env("SKILLISSUE_CONFIG", config)
+        .args(["delete", "foo", "--dry-run", "--no-color"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("DELETE"))
+        .stdout(predicate::str::contains("Dry run; no files changed."));
+    assert!(target.join("foo").is_symlink());
+    assert!(root.join("foo").is_dir());
+}
+
+#[test]
+fn delete_rejects_missing_canonical_skills() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("root");
+    let target = temp.path().join("target");
+    fs::create_dir_all(&root).unwrap();
+    fs::create_dir_all(&target).unwrap();
+    let config = temp.path().join("config.toml");
+    write_config(&config, &root, &[("agent", &target)]);
+    cargo_bin_cmd!("si")
+        .env("SKILLISSUE_CONFIG", config)
+        .args(["delete", "missing", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("canonical skill does not exist"));
+}
+
 #[test]
 fn enable_requires_at_least_one_enabled_target() {
     let temp = tempfile::tempdir().unwrap();

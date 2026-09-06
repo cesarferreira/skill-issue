@@ -120,6 +120,8 @@ coverage, conflicts, and broken links:
 - `↑`/`↓` or `j`/`k` navigates; `/` filters skills.
 - `Tab` switches between Skills, Agents, and Health views.
 - `d` previews and confirms enable/disable for the selected canonical skill.
+- `D` previews and confirms permanently deleting the selected canonical skill
+  and every link to it.
 - `r` rescans the filesystem; `?` opens the complete keyboard guide.
 - `si tui --project .` includes project-local `.claude` and `.agents` skills.
 - `--dry-run` keeps action previews fully read-only, and `--no-color` uses a
@@ -129,6 +131,10 @@ Disabling removes only verified, managed symlinks from every configured agent.
 The canonical skill is never deleted. Re-enable it from the TUI or with
 `si enable <skill>`. The equivalent non-interactive preview is
 `si disable <skill> --dry-run`.
+
+Deleting is different: it removes every managed link *and* the canonical copy
+itself, and cannot be undone. Use `si delete <skill>` or press `D` in the TUI;
+both always preview the plan first and require confirmation.
 
 Common follow-up operations:
 
@@ -141,6 +147,7 @@ si link rust-cli --target gemini
 si unlink rust-cli --target gemini
 si disable rust-cli
 si enable rust-cli
+si delete rust-cli
 ```
 
 Every mutating command supports `--dry-run`. Colour is disabled by `NO_COLOR`
