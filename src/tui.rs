@@ -187,7 +187,7 @@ impl App {
             KeyCode::Char('/') if self.view == View::Skills => self.mode = Mode::Filter,
             KeyCode::Char('r') => self.refresh()?,
             KeyCode::Char('d') if self.view == View::Skills => self.prepare_toggle()?,
-            KeyCode::Char('D') if self.view == View::Skills => self.prepare_delete()?,
+            KeyCode::Char('x' | 'D') if self.view == View::Skills => self.prepare_delete()?,
             KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
             KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
             KeyCode::Home => self.select_edge(false),
@@ -778,7 +778,9 @@ impl App {
                 Span::styled(" / ", self.pill(ACCENT)),
                 Span::styled(" filter  ", self.style(Color::White)),
                 Span::styled(" d ", self.pill(WARN)),
-                Span::styled(" enable/disable  ", self.style(Color::White)),
+                Span::styled(" toggle  ", self.style(Color::White)),
+                Span::styled(" x ", self.pill(BAD)),
+                Span::styled(" delete  ", self.style(Color::White)),
                 Span::styled(" r ", self.pill(GOOD)),
                 Span::styled(" refresh  ", self.style(Color::White)),
                 Span::styled(" ? ", self.pill(MUTED)),
@@ -813,7 +815,7 @@ impl App {
                     Line::raw("             (always previews and confirms first)"),
                     Line::raw(""),
                     Line::styled(
-                        "D            Permanently delete the selected skill",
+                        "x / D        Permanently delete the selected skill",
                         self.style(BAD),
                     ),
                     Line::raw("             (removes every link and the canonical copy)"),
@@ -1107,6 +1109,17 @@ mod tests {
             .unwrap();
         assert!(!destination.exists());
         assert!(matches!(app.mode, Mode::Browse));
+    }
+
+    #[test]
+    fn x_opens_the_delete_confirmation_for_the_selected_skill() {
+        let (_temp, config) = fixture();
+        let mut app = App::new(config, false, false).unwrap();
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))
+            .unwrap();
+
+        assert!(matches!(app.mode, Mode::ConfirmDelete(_)));
     }
 
     #[test]
