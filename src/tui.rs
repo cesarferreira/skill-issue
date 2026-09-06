@@ -767,7 +767,7 @@ impl App {
                     format!(" / {}_", self.filter),
                     self.style(Color::White).add_modifier(Modifier::BOLD),
                 ),
-                Line::styled(" Enter apply  ·  Esc clear", self.style(MUTED)),
+                Line::styled(" Enter sync  ·  Esc clear", self.style(MUTED)),
             ]
         } else {
             vec![Line::from(vec![

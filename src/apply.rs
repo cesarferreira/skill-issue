@@ -33,7 +33,7 @@ pub(crate) fn run(config: &Config, dry_run: bool) -> Result<u8> {
         println!("{}", theme::dim("Everything is already applied."));
         return Ok(EXIT_OK);
     }
-    require_confirmation_with_default("Apply this plan?", true)?;
+    require_confirmation_with_default("Synchronize this plan?", true)?;
     execute_plan(&plan, config)?;
     let created_link_count = plan.create_links.len() + plan.replace_identical.len();
     if created_link_count > 0 {
@@ -130,7 +130,7 @@ fn build_plan(config: &Config) -> Result<ApplyPlan> {
 }
 
 fn render_plan(plan: &ApplyPlan, config: &Config) {
-    println!("{}", theme::heading("APPLY PLAN"));
+    println!("{}", theme::heading("SYNC PLAN"));
     for target in &plan.create_targets {
         println!(
             "{}  {}",

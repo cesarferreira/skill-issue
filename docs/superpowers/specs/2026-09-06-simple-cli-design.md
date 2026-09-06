@@ -34,7 +34,7 @@ The public CLI contains:
 
 ```text
 si setup [SKILLS_DIR]
-si apply
+si sync
 si status
 si tui
 si diff <SKILL>
@@ -113,13 +113,13 @@ When a target contains a physical directory with the same name:
 
 Setup finishes by rescanning and reporting whether the machine is healthy.
 
-## `si apply`
+## `si sync`
 
-`apply` reconciles the canonical directory with the configured agent targets.
+`sync` reconciles the canonical directory with the configured agent targets.
 It is the command users run after `git clone`, `git pull`, or manual changes to
 the canonical directory. It does not fetch, pull, commit, or push Git data.
 
-Apply builds a deterministic plan that may:
+Sync builds a deterministic plan that may:
 
 - create missing configured target directories;
 - create missing links for every canonical skill in every enabled target;
@@ -131,7 +131,7 @@ Apply builds a deterministic plan that may:
 A stale managed symlink is safe to remove because only the symlink is deleted;
 no physical skill content is removed.
 
-Apply must preserve and report:
+Sync must preserve and report:
 
 - divergent physical directories;
 - foreign symlinks;
@@ -142,7 +142,7 @@ Apply must preserve and report:
 If any preserved conflict prevents a requested link, apply returns the
 documented issues exit code and recommends `si diff <skill>` or `si setup`.
 
-Apply shows its full plan before mutation, supports `--dry-run` and `--yes`,
+Sync shows its full plan before mutation, supports `--dry-run` and `--yes`,
 executes transactionally, verifies every resulting link, and reports the final
 health state.
 
@@ -169,7 +169,7 @@ The output ends with one actionable recommendation:
 - no configuration: `si setup <skills-dir>`;
 - uncollected or divergent physical skills: `si setup` or
   `si diff <skill>`;
-- safely repairable link drift: `si apply`;
+- safely repairable link drift: `si sync`;
 - healthy state: `No skill issues.`
 
 Machine-readable JSON remains available for status and diff.
@@ -189,7 +189,7 @@ Existing views and actions remain available:
 - project-local inspection where currently supported.
 
 TUI guidance and notices use the new vocabulary. For example, an uncollected
-skill recommends `si setup`, and missing canonical links recommend `si apply`.
+skill recommends `si setup`, and missing canonical links recommend `si sync`.
 
 ## Internal design
 
@@ -229,7 +229,7 @@ permissions where knowable, collisions, and canonical/target containment.
 
 Setup stages physical directories before replacement. If a later operation
 fails, it restores staged directories and removes links created by the failed
-transaction. Apply records created, removed, and replaced links and rolls them
+transaction. Sync records created, removed, and replaced links and rolls them
 back if verification fails.
 
 Non-interactive divergent content is an actionable error. `--yes` authorizes a
@@ -243,7 +243,7 @@ The README leads with the result and the two-machine workflow:
 1. one-paragraph promise;
 2. first-computer setup;
 3. new-computer setup;
-4. everyday `git pull` followed by `si apply`;
+4. everyday `git pull` followed by `si sync`;
 5. the four primary commands;
 6. safety guarantees;
 7. optional TUI;
@@ -293,7 +293,7 @@ A new user can understand the product from the first README screen and needs
 only one command to consolidate an existing machine.
 
 After cloning or pulling the canonical repository on another computer, the
-user needs only `si setup <skills-dir>` once and `si apply` thereafter.
+user needs only `si setup <skills-dir>` once and `si sync` thereafter.
 
 At rest, each skill has one real directory under the canonical root, every
 enabled agent sees it through a symlink, Git remains the only remote

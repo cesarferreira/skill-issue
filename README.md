@@ -45,25 +45,25 @@ si setup ~/skills \
 
 ## After pulling changes
 
-Git remains responsible for synchronization. `si apply` only reconciles local
+Git remains responsible for remote synchronization. `si sync` only reconciles local
 agent links: it adds links for new skills, repairs managed links, and removes
 stale managed links for skills deleted through Git.
 
 ```bash
 git -C ~/code/skills pull
-si apply
+si sync
 ```
 
 ## Everyday changes
 
-`si apply` reconciles links after any change to the canonical directory, whether
+`si sync` reconciles links after any change to the canonical directory, whether
 the change came from Git or from you editing it directly.
 
 Delete a canonical skill, then remove its stale managed links everywhere:
 
 ```bash
 rm -rf ~/skills/old-skill
-si apply
+si sync
 ```
 
 Add new skill directories to `~/skills` and run the same command. It creates
@@ -71,7 +71,7 @@ their links in every configured agent while removing links for any skills you
 deleted:
 
 ```bash
-si apply
+si sync
 ```
 
 If a new skill is installed directly into an agent directory, collect it with
@@ -87,7 +87,7 @@ si setup
 | Command | What it does |
 | --- | --- |
 | `si setup [PATH]` | Configure a canonical directory, collect local skills, and link detected agents. |
-| `si apply` | Reconcile canonical skills into every configured agent. Run after `git pull`. |
+| `si sync` | Reconcile canonical skills into every configured agent. Run after `git pull`. |
 | `si status` or `si` | Read-only overview of skills, agent coverage, conflicts, and Git health. |
 | `si tui` | Optional interactive dashboard for inspecting and managing skills. |
 

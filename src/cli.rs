@@ -36,7 +36,7 @@ pub struct Cli {
     /// Emit machine-readable JSON for read commands.
     #[arg(long, global = true)]
     pub json: bool,
-    /// Apply a displayed safe plan without prompting.
+    /// Confirm a displayed safe plan without prompting.
     #[arg(long, global = true)]
     pub yes: bool,
     #[command(subcommand)]
@@ -61,8 +61,8 @@ pub enum Command {
         #[arg(long = "ignore", value_name = "PATTERN")]
         ignore: Vec<String>,
     },
-    /// Reconcile canonical skills into configured agent directories.
-    Apply,
+    /// Synchronize canonical skills into configured agent directories.
+    Sync,
     /// Show the current health summary.
     Status,
     /// Compare the distinct copies of a skill.
