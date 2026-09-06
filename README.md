@@ -66,7 +66,7 @@ copies are moved into the canonical directory and their original locations are
 replaced with symlinks. Divergent copies are never overwritten: the guided flow
 asks which version to adopt or lets you keep each version under a separate
 name. Rejected versions are verified and preserved under
-`~/.cache/skillissue/migrations/` before their installations are linked to the
+`~/.cache/skill-issue/migrations/` before their installations are linked to the
 selected copy.
 
 Once everything is healthy, `si` returns to its natural state: quietly judging
@@ -120,6 +120,10 @@ or `--no-color`. After reviewing a plan, `--yes` allows safe non-interactive
 execution; divergent copies still require an interactive choice. With a skill
 name, `link --all` links that skill into every detected agent. Without a skill
 name, it links every canonical skill into every detected agent.
+
+Configuration lives at `~/.config/skill-issue/config.toml`. Set
+`SKILL_ISSUE_CONFIG` to use another location. Existing installations using the
+legacy path or environment variable continue to work.
 
 ## More workflows
 

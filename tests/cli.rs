@@ -61,6 +61,21 @@ fn missing_configuration_has_documented_exit_code() {
 }
 
 #[test]
+fn current_configuration_environment_variable_is_supported() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("root");
+    fs::create_dir_all(&root).unwrap();
+    let config = temp.path().join("config.toml");
+    write_config(&config, &root, &[]);
+    cargo_bin_cmd!("si")
+        .env("SKILL_ISSUE_CONFIG", config)
+        .arg("status")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("skill-issue"));
+}
+
+#[test]
 fn init_dry_run_does_not_write_files() {
     let temp = tempfile::tempdir().unwrap();
     let config = temp.path().join("config.toml");
@@ -355,6 +370,38 @@ fn toggles_reject_missing_canonical_skills() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("canonical skill does not exist"));
+}
+
+#[test]
+fn enable_requires_at_least_one_enabled_target() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("root");
+    skill(&root.join("foo"), "body");
+    let config = temp.path().join("config.toml");
+    write_config(&config, &root, &[]);
+    cargo_bin_cmd!("si")
+        .env("SKILLISSUE_CONFIG", config)
+        .args(["enable", "foo", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no enabled targets were detected"));
+}
+
+#[test]
+fn tui_rejects_json_mode_before_touching_the_terminal() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("root");
+    fs::create_dir_all(&root).unwrap();
+    let config = temp.path().join("config.toml");
+    write_config(&config, &root, &[]);
+    cargo_bin_cmd!("si")
+        .env("SKILLISSUE_CONFIG", config)
+        .args(["tui", "--json"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "--json cannot be combined with tui",
+        ));
 }
 
 #[test]

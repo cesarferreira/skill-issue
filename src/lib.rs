@@ -142,12 +142,22 @@ fn set_color(no_color: bool) {
 
 impl Config {
     fn path() -> Result<PathBuf> {
+        if let Some(path) = std::env::var_os("SKILL_ISSUE_CONFIG") {
+            return Ok(PathBuf::from(path));
+        }
+        // Keep accepting the original variable so existing installations do not break.
         if let Some(path) = std::env::var_os("SKILLISSUE_CONFIG") {
             return Ok(PathBuf::from(path));
         }
         let dir = dirs::config_dir()
             .ok_or_else(|| anyhow!("could not determine the configuration directory"))?;
-        Ok(dir.join("skillissue/config.toml"))
+        let current = dir.join("skill-issue/config.toml");
+        let legacy = dir.join("skillissue/config.toml");
+        Ok(if current.exists() || !legacy.exists() {
+            current
+        } else {
+            legacy
+        })
     }
 
     fn load() -> Result<Self> {
@@ -425,7 +435,10 @@ fn empty_group(name: &str) -> SkillGroup {
 }
 
 fn ignored_top_level(name: &str) -> bool {
-    name == ".git" || name == ".DS_Store" || name.starts_with(".skillissue-")
+    name == ".git"
+        || name == ".DS_Store"
+        || name.starts_with(".skill-issue-")
+        || name.starts_with(".skillissue-")
 }
 
 fn inspect_installation(
@@ -1532,11 +1545,12 @@ fn plan_selected_version_at(
 }
 
 fn migration_archive_root() -> Result<PathBuf> {
-    let base = std::env::var_os("SKILLISSUE_CACHE")
+    let base = std::env::var_os("SKILL_ISSUE_CACHE")
+        .or_else(|| std::env::var_os("SKILLISSUE_CACHE"))
         .map(PathBuf::from)
         .or_else(|| dirs::home_dir().map(|home| home.join(".cache")))
         .ok_or_else(|| anyhow!("could not determine cache directory for migration archive"))?;
-    Ok(base.join("skillissue/migrations").join(
+    Ok(base.join("skill-issue/migrations").join(
         chrono::Utc::now()
             .format("%Y-%m-%dT%H%M%S%.3fZ")
             .to_string(),
@@ -1940,7 +1954,7 @@ fn unique_sibling(path: &Path, purpose: &str) -> PathBuf {
         .unwrap_or_else(|| OsStr::new("skill"))
         .to_string_lossy();
     path.with_file_name(format!(
-        ".skillissue-{purpose}-{name}-{}-{sequence}",
+        ".skill-issue-{purpose}-{name}-{}-{sequence}",
         std::process::id()
     ))
 }
@@ -2257,7 +2271,8 @@ fn recovery_artifacts(config: &Config) -> Result<Vec<PathBuf>> {
     for location in locations.filter(|path| path.is_dir()) {
         for entry in sorted_children(location)? {
             let name = entry.file_name();
-            if name.to_string_lossy().starts_with(".skillissue-") {
+            let name = name.to_string_lossy();
+            if name.starts_with(".skill-issue-") || name.starts_with(".skillissue-") {
                 artifacts.push(entry.path());
             }
         }
@@ -2792,6 +2807,9 @@ pub(crate) fn plan_skill_toggle(
             "canonical skill does not exist as a real directory: {}",
             canonical.display()
         );
+    }
+    if enable && !config.targets.values().any(|target| target.enabled) {
+        bail!("no enabled targets were detected; add one with `si targets add`");
     }
 
     let mut actions = Vec::new();
@@ -3421,6 +3439,41 @@ mod tests {
             filetime::FileTime::from_last_modification_time(&copied),
             timestamp
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn enabling_rolls_back_links_when_a_later_target_changes() {
+        let (_temp, config) = fixture();
+        skill(&config.root.join("foo"), "body");
+        let plan = plan_skill_toggle(&config, "foo", true).unwrap();
+        fs::remove_dir(&config.targets["codex"].path).unwrap();
+        fs::write(&config.targets["codex"].path, "now a file").unwrap();
+
+        assert!(plan.apply().is_err());
+        assert!(!config.targets["claude"].path.join("foo").exists());
+        assert!(config.root.join("foo").is_dir());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn disabling_restores_removed_links_when_a_later_target_changes() {
+        let (_temp, config) = fixture();
+        let canonical = config.root.join("foo");
+        skill(&canonical, "body");
+        let claude = config.targets["claude"].path.join("foo");
+        let codex = config.targets["codex"].path.join("foo");
+        std::os::unix::fs::symlink(&canonical, &claude).unwrap();
+        std::os::unix::fs::symlink(&canonical, &codex).unwrap();
+        let plan = plan_skill_toggle(&config, "foo", false).unwrap();
+        fs::remove_file(&codex).unwrap();
+        skill(&codex, "changed concurrently");
+
+        assert!(plan.apply().is_err());
+        assert!(claude.is_symlink());
+        verify_link(&claude, &canonical).unwrap();
+        assert!(codex.is_dir());
+        assert!(canonical.is_dir());
     }
 
     #[test]

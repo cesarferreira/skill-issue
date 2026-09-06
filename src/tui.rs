@@ -56,22 +56,22 @@ fn run_terminal(mut app: App) -> Result<()> {
         let _ = disable_raw_mode();
         return Err(error.into());
     }
+    let _restore = RestoreTerminal;
     let backend = CrosstermBackend::new(stdout);
-    let mut terminal = match Terminal::new(backend) {
-        Ok(terminal) => terminal,
-        Err(error) => {
-            let _ = disable_raw_mode();
-            let mut stdout = io::stdout();
-            let _ = execute!(stdout, LeaveAlternateScreen);
-            return Err(error.into());
-        }
-    };
+    let mut terminal = Terminal::new(backend)?;
 
     let result = app.event_loop(&mut terminal);
     let _ = terminal.show_cursor();
-    let _ = disable_raw_mode();
-    let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen);
     result
+}
+
+struct RestoreTerminal;
+
+impl Drop for RestoreTerminal {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), LeaveAlternateScreen);
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -352,6 +352,14 @@ impl App {
             .collect()
     }
 
+    fn enabled_target_count(&self) -> usize {
+        self.config
+            .targets
+            .values()
+            .filter(|target| target.enabled)
+            .count()
+    }
+
     fn selected_skill(&self) -> Option<&SkillGroup> {
         self.skill_state
             .selected()
@@ -414,7 +422,7 @@ impl App {
             Span::styled(format!(" {conflicts} conflicts "), self.pill(BAD)),
             Span::raw("  "),
             Span::styled(
-                format!(" {} agents ", self.config.targets.len()),
+                format!(" {} agents ", self.enabled_target_count()),
                 self.pill(BRAND),
             ),
         ]);
@@ -456,7 +464,7 @@ impl App {
                     } else {
                         "—"
                     }),
-                    Cell::from(format!("{linked}/{}", self.config.targets.len())),
+                    Cell::from(format!("{linked}/{}", self.enabled_target_count())),
                 ])
                 .style(self.style(color))
             })
@@ -824,7 +832,11 @@ impl App {
                         .title_alignment(Alignment::Center)
                         .borders(Borders::ALL)
                         .border_style(self.style(BRAND))
-                        .style(self.style(Color::White).bg(Color::Rgb(15, 23, 42)))
+                        .style(if self.no_color {
+                            Style::default()
+                        } else {
+                            self.style(Color::White).bg(Color::Rgb(15, 23, 42))
+                        })
                         .padding(Padding::uniform(2)),
                 ),
             area,
@@ -955,6 +967,83 @@ mod tests {
             .unwrap();
         assert_eq!(app.filtered_skills().len(), 1);
         assert_eq!(app.skill_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn dashboard_renders_safely_in_a_small_terminal() {
+        let (_temp, config) = fixture();
+        let mut app = App::new(config, false, false).unwrap();
+        let backend = TestBackend::new(40, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert!(!terminal.backend().to_string().trim().is_empty());
+    }
+
+    #[test]
+    fn dry_run_confirmation_never_changes_files() {
+        let (_temp, config) = fixture();
+        let destination = config.targets["claude"].path.join("rust-cli");
+        let mut app = App::new(config, true, false).unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE))
+            .unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        assert!(!destination.exists());
+        assert!(app.notice.contains("Dry run"));
+    }
+
+    #[test]
+    fn cancelled_confirmation_keeps_the_skill_unchanged() {
+        let (_temp, config) = fixture();
+        let destination = config.targets["claude"].path.join("rust-cli");
+        let mut app = App::new(config, false, false).unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE))
+            .unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        assert!(!destination.exists());
+        assert!(matches!(app.mode, Mode::Browse));
+    }
+
+    #[test]
+    fn tab_navigation_renders_agent_and_health_views() {
+        let (_temp, config) = fixture();
+        let mut app = App::new(config, false, false).unwrap();
+        let backend = TestBackend::new(100, 28);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.view, View::Agents);
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert!(terminal.backend().to_string().contains("Agent details"));
+
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.view, View::Health);
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert!(terminal.backend().to_string().contains("Canonical health"));
+
+        app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.view, View::Agents);
+    }
+
+    #[test]
+    fn unadopted_skill_toggle_shows_safe_guidance() {
+        let (temp, mut config) = fixture();
+        fs::remove_dir_all(config.root.join("rust-cli")).unwrap();
+        let physical = temp.path().join("agent/unadopted");
+        fs::create_dir_all(&physical).unwrap();
+        fs::write(physical.join("SKILL.md"), "body").unwrap();
+        config.targets.get_mut("claude").unwrap().path = temp.path().join("agent");
+        let mut app = App::new(config, false, false).unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE))
+            .unwrap();
+        assert!(matches!(app.mode, Mode::Notice));
+        assert!(app.notice.contains("si adopt"));
     }
 
     #[cfg(unix)]
