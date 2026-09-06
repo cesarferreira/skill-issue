@@ -219,6 +219,103 @@ fn restore_dry_run_plans_every_canonical_skill() {
     assert!(!target.join("foo").exists());
 }
 
+#[cfg(unix)]
+#[test]
+fn apply_links_every_canonical_skill_into_every_target() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("root");
+    let claude = temp.path().join("claude");
+    let codex = temp.path().join("codex");
+    skill(&root.join("foo"), "body");
+    fs::create_dir_all(&claude).unwrap();
+    fs::create_dir_all(&codex).unwrap();
+    let config = temp.path().join("config.toml");
+    write_config(&config, &root, &[("claude", &claude), ("codex", &codex)]);
+
+    cargo_bin_cmd!("si")
+        .env("SKILL_ISSUE_CONFIG", &config)
+        .args(["apply", "--yes", "--no-color"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("2 links created"));
+
+    let canonical = fs::canonicalize(root.join("foo")).unwrap();
+    assert_eq!(fs::canonicalize(claude.join("foo")).unwrap(), canonical);
+    assert_eq!(fs::canonicalize(codex.join("foo")).unwrap(), canonical);
+}
+
+#[cfg(unix)]
+#[test]
+fn apply_removes_stale_managed_links_after_a_skill_is_deleted() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("root");
+    let target = temp.path().join("target");
+    fs::create_dir_all(&root).unwrap();
+    fs::create_dir_all(&target).unwrap();
+    std::os::unix::fs::symlink(root.join("removed"), target.join("removed")).unwrap();
+    let config = temp.path().join("config.toml");
+    write_config(&config, &root, &[("agent", &target)]);
+
+    cargo_bin_cmd!("si")
+        .env("SKILL_ISSUE_CONFIG", &config)
+        .args(["apply", "--yes", "--no-color"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("1 stale link removed"));
+
+    assert!(fs::symlink_metadata(target.join("removed")).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn apply_replaces_an_identical_physical_copy_with_a_link() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("root");
+    let target = temp.path().join("target");
+    skill(&root.join("foo"), "same");
+    skill(&target.join("foo"), "same");
+    let config = temp.path().join("config.toml");
+    write_config(&config, &root, &[("agent", &target)]);
+
+    cargo_bin_cmd!("si")
+        .env("SKILL_ISSUE_CONFIG", &config)
+        .args(["apply", "--yes", "--no-color"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("1 link created"));
+
+    assert!(target.join("foo").is_symlink());
+    assert_eq!(
+        fs::canonicalize(target.join("foo")).unwrap(),
+        fs::canonicalize(root.join("foo")).unwrap()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn apply_preserves_a_divergent_physical_copy() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("root");
+    let target = temp.path().join("target");
+    skill(&root.join("foo"), "canonical");
+    skill(&target.join("foo"), "local");
+    let config = temp.path().join("config.toml");
+    write_config(&config, &root, &[("agent", &target)]);
+
+    cargo_bin_cmd!("si")
+        .env("SKILL_ISSUE_CONFIG", &config)
+        .args(["apply", "--yes", "--no-color"])
+        .assert()
+        .code(2)
+        .stdout(predicate::str::contains("si setup"));
+
+    assert_eq!(
+        fs::read_to_string(target.join("foo/SKILL.md")).unwrap(),
+        "local"
+    );
+    assert!(!target.join("foo").is_symlink());
+}
+
 #[test]
 fn completions_generate_shell_script_without_configuration() {
     cargo_bin_cmd!("si")

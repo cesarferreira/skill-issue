@@ -62,6 +62,8 @@ pub enum Command {
     },
     /// Move skills into the canonical root and replace copies with links.
     Adopt { skill: Option<String> },
+    /// Reconcile canonical skills into configured agent directories.
+    Apply,
     /// Show the current health summary.
     Status {
         /// Include canonical-root Git health.
