@@ -2,41 +2,74 @@
 
 All notable changes to this project will be documented in this file.
 
-## Unreleased
+## [0.3.0] - 2026-09-06
 
 ### 🚀 Features
 
-- Guide adoption skill by skill and report a consolidated migration summary.
-- Preserve rejected divergent versions in a verified, dated migration archive.
-- Link adopted skills into every detected agent and report per-agent coverage.
-- Let `link --all` infer all detected targets and support `unlink --target`.
-- Present compact scan and everyday status output with friendly paths and names.
+- Polish the skill adoption journey
+- Add TUI skill deletion
+- Add local skill apply workflow
+- Add guided skill repository setup
+- Add TUI delete shortcut
+- Support home skills migration
+- Rename apply command to sync
+- Collect skills during sync
 
-### 🧪 Testing
+### 🐛 Bug Fixes
 
-- Use cargo-nextest locally and in CI, with end-to-end coverage for the new workflows.
+- Fix
+- Name canonical root in Git warning
+- Abbreviate home paths in CLI output
+- Preview first setup migration
 
+### 💼 Other
+
+- Updated readme
+- Add an interactive skill dashboard and sync workflow ([#2](https://github.com/cesarferreira/skill-issue/issues/2))
+- Mvp
+- Removed superpowers
+
+### 🚜 Refactor
+
+- Simplify the public CLI
+- Remove shell completions
+
+### 📚 Documentation
+
+- Design simplified CLI workflow
+- Plan simplified CLI implementation
+- Explain the simple skills workflow
+- Design home skills migration
+- Clarify everyday skill synchronization
+- Design sync command
+- Clarify setup and sync commands
+
+### ⚙️ Miscellaneous Tasks
+
+- Ignore local worktrees
 ## [0.2.0] - 2026-09-06
 
 ### 🚀 Features
 
-- Discover project-local Claude and `.agents` skills with `scan --project`.
-- Report canonical-root Git health with `status --git`.
-- Restore every canonical skill into configured targets.
-- Emit JSON from read commands and generate shell completions.
-- Support configurable relative symlinks and fingerprint ignore patterns.
-
-### 🛡️ Safety
-
-- Preserve permissions, timestamps, and extended attributes during cross-filesystem copies.
-- Support explicit non-interactive confirmation with `--yes` while conflicts still require a TTY.
-- Detect recovery artifacts left by interrupted migrations.
-
+- Add skill-issue v0.2 workflows
 ## [0.1.0] - 2026-09-06
 
-### 🚀 Features
+### 🐛 Bug Fixes
 
-- Discover and fingerprint skills across built-in and custom agent targets.
-- Safely adopt physical copies into one canonical directory with verified symlinks.
-- Diagnose divergence, broken links, unsafe topology, and interrupted migrations.
-- Preview all filesystem mutations with dry-run operation plans.
+- Harden v0.1 migrations and releases
+
+### 💼 Other
+
+- Mvp
+
+### 🚜 Refactor
+
+- Publish package as skill-issue with si binary
+
+### 📚 Documentation
+
+- Use GitHub-only distribution
+
+### ⚙️ Miscellaneous Tasks
+
+- Point metadata at skill-issue repository
