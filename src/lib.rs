@@ -95,6 +95,7 @@ pub fn run(cli: Cli) -> Result<u8> {
     ASSUME_YES.store(cli.yes, Ordering::Relaxed);
     match cli.command {
         Some(Command::Init { root }) => init(root, cli.dry_run),
+        Some(Command::Setup { root }) => setup_command(root, cli.dry_run),
         Some(Command::Completions { shell }) => {
             let mut command = cli::command();
             generate(shell, &mut command, "si", &mut io::stdout());
@@ -144,6 +145,7 @@ pub fn run(cli: Cli) -> Result<u8> {
                 Command::Restore => restore_command(&config, cli.dry_run),
                 Command::Sync { check } => sync_command(&config, check, cli.dry_run),
                 Command::Init { .. } => unreachable!(),
+                Command::Setup { .. } => unreachable!(),
                 Command::Completions { .. } => unreachable!(),
             }
         }
@@ -375,6 +377,40 @@ fn init(root: Option<PathBuf>, dry_run: bool) -> Result<u8> {
         println!("{} Configuration saved", theme::ok());
     }
     Ok(EXIT_OK)
+}
+
+fn setup_command(root: Option<PathBuf>, dry_run: bool) -> Result<u8> {
+    let config = match Config::load() {
+        Ok(config) => {
+            if let Some(root) = root {
+                let requested = absolute_path(&root)?;
+                if requested != config.root {
+                    bail!(
+                        "configuration already uses {}; run `si config set-root {}` first",
+                        config.root.display(),
+                        requested.display()
+                    );
+                }
+            }
+            config
+        }
+        Err(error) if is_missing_config(&error) => {
+            init(root, dry_run)?;
+            if dry_run {
+                return Ok(EXIT_OK);
+            }
+            Config::load()?
+        }
+        Err(error) => return Err(error),
+    };
+    validate_config(&config)?;
+    let result = scan(&config)?;
+    adopt_from_scan(&config, &result, None, dry_run, true)?;
+    if dry_run {
+        return Ok(EXIT_OK);
+    }
+    apply::run(&config, false)?;
+    Ok(result_exit(&scan(&config)?))
 }
 
 pub fn scan(config: &Config) -> Result<ScanResult> {

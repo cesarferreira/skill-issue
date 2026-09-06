@@ -54,6 +54,8 @@ pub enum Command {
     },
     /// Configure the canonical skill directory.
     Init { root: Option<PathBuf> },
+    /// Set up one canonical skill directory and link every detected agent.
+    Setup { root: Option<PathBuf> },
     /// Scan configured skill locations without changing them.
     Scan {
         /// Include project-local .claude and .agents skills.
