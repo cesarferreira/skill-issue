@@ -900,16 +900,7 @@ fn target_rank(id: &str) -> u8 {
 }
 
 fn display_path(path: &Path) -> String {
-    if let Some(home) = dirs::home_dir()
-        && let Ok(relative) = path.strip_prefix(home)
-    {
-        return if relative.as_os_str().is_empty() {
-            "~".into()
-        } else {
-            format!("~/{}", relative.display())
-        };
-    }
-    path.display().to_string()
+    theme::display_path(path)
 }
 
 fn result_exit(result: &ScanResult) -> u8 {

@@ -121,11 +121,25 @@ pub(crate) fn agent_padded(label: &str, width: usize) -> StyledObject<String> {
 }
 
 pub(crate) fn path(value: &Path) -> StyledObject<String> {
-    dim_owned(value.display().to_string())
+    dim_owned(display_path(value))
+}
+
+pub(crate) fn display_path(path: &Path) -> String {
+    if let Some(home) = dirs::home_dir()
+        && let Ok(relative) = path.strip_prefix(home)
+    {
+        return if relative.as_os_str().is_empty() {
+            "~".into()
+        } else {
+            format!("~/{}", relative.display())
+        };
+    }
+    path.display().to_string()
 }
 
 pub(crate) fn path_text(value: &str) -> StyledObject<String> {
-    dim_owned(value.to_string())
+    let value = Path::new(value);
+    dim_owned(display_path(value))
 }
 
 pub(crate) fn fingerprint(value: &str) -> StyledObject<String> {
@@ -264,5 +278,18 @@ mod tests {
         assert_eq!(filled_cells(2, 3, 12), 8);
         assert_eq!(filled_cells(3, 3, 12), 12);
         assert_eq!(filled_cells(1, 0, 12), 0);
+    }
+
+    #[test]
+    fn paths_inside_home_are_rendered_with_a_tilde() {
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(
+            path(&home.join(".codex/skills/android-cli")).to_string(),
+            "~/.codex/skills/android-cli"
+        );
+        assert_eq!(
+            path(Path::new("/tmp/skill-issue")).to_string(),
+            "/tmp/skill-issue"
+        );
     }
 }
