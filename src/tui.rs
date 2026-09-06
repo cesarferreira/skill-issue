@@ -564,7 +564,7 @@ impl App {
         let canonical = group
             .canonical
             .as_ref()
-            .map(|skill| skill.path.display().to_string())
+            .map(|skill| super::theme::display_path(&skill.path))
             .unwrap_or_else(|| "Not adopted".to_string());
         let mut lines = vec![
             Line::styled(
@@ -601,7 +601,7 @@ impl App {
                     Span::styled(kind, self.style(MUTED)),
                 ]));
                 lines.push(Line::styled(
-                    format!("  {}", installation.path.display()),
+                    format!("  {}", super::theme::display_path(&installation.path)),
                     self.style(MUTED),
                 ));
             }
@@ -668,7 +668,7 @@ impl App {
                 ),
                 Line::raw(""),
                 Line::styled("PATH", self.style(MUTED)),
-                Line::styled(target.path.display().to_string(), self.style(BRAND)),
+                Line::styled(super::theme::display_path(&target.path), self.style(BRAND)),
                 Line::raw(""),
                 Line::from(format!(
                     "State          {}",
@@ -841,7 +841,7 @@ impl App {
                 ];
                 for path in plan.paths().take(5) {
                     lines.push(Line::styled(
-                        format!("  {}", path.display()),
+                        format!("  {}", super::theme::display_path(path)),
                         self.style(MUTED),
                     ));
                 }
@@ -882,7 +882,7 @@ impl App {
                 ];
                 for path in plan.links().take(5) {
                     lines.push(Line::styled(
-                        format!("  {}", path.display()),
+                        format!("  {}", super::theme::display_path(path)),
                         self.style(MUTED),
                     ));
                 }
@@ -893,7 +893,7 @@ impl App {
                     ));
                 }
                 lines.push(Line::styled(
-                    format!("  {}", plan.canonical().display()),
+                    format!("  {}", super::theme::display_path(plan.canonical())),
                     self.style(MUTED),
                 ));
                 lines.push(Line::raw(""));
