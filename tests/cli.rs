@@ -25,9 +25,28 @@ fn help_lists_the_v01_commands() {
         .arg("--help")
         .assert()
         .success()
+        .stdout(predicate::str::contains("tui"))
         .stdout(predicate::str::contains("adopt"))
         .stdout(predicate::str::contains("doctor"))
+        .stdout(predicate::str::contains("disable"))
+        .stdout(predicate::str::contains("enable"))
         .stdout(predicate::str::contains("targets"));
+}
+
+#[test]
+fn tui_refuses_noninteractive_output_without_corrupting_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("root");
+    fs::create_dir_all(&root).unwrap();
+    let config = temp.path().join("config.toml");
+    write_config(&config, &root, &[]);
+    cargo_bin_cmd!("si")
+        .env("SKILLISSUE_CONFIG", config)
+        .arg("tui")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("requires an interactive terminal"))
+        .stdout(predicate::str::is_empty());
 }
 
 #[test]
@@ -225,6 +244,117 @@ fn link_and_unlink_protect_the_canonical_skill() {
         .success();
     assert!(!target.join("foo").exists());
     assert!(root.join("foo").is_dir());
+}
+
+#[cfg(unix)]
+#[test]
+fn disable_and_enable_toggle_every_managed_agent_link() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("root");
+    let claude = temp.path().join("claude");
+    let codex = temp.path().join("codex");
+    skill(&root.join("foo"), "body");
+    fs::create_dir_all(&claude).unwrap();
+    fs::create_dir_all(&codex).unwrap();
+    std::os::unix::fs::symlink(root.join("foo"), claude.join("foo")).unwrap();
+    std::os::unix::fs::symlink(root.join("foo"), codex.join("foo")).unwrap();
+    let config = temp.path().join("config.toml");
+    write_config(&config, &root, &[("claude", &claude), ("codex", &codex)]);
+
+    cargo_bin_cmd!("si")
+        .env("SKILLISSUE_CONFIG", &config)
+        .args(["disable", "foo", "--yes", "--no-color"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("disabled for 2 agents"));
+    assert!(!claude.join("foo").exists());
+    assert!(!codex.join("foo").exists());
+    assert!(root.join("foo").is_dir());
+
+    cargo_bin_cmd!("si")
+        .env("SKILLISSUE_CONFIG", &config)
+        .args(["enable", "foo", "--yes", "--no-color"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("enabled for 2 agents"));
+    assert!(claude.join("foo").is_symlink());
+    assert!(codex.join("foo").is_symlink());
+}
+
+#[cfg(unix)]
+#[test]
+fn disable_dry_run_previews_without_removing_links() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("root");
+    let target = temp.path().join("target");
+    skill(&root.join("foo"), "body");
+    fs::create_dir_all(&target).unwrap();
+    std::os::unix::fs::symlink(root.join("foo"), target.join("foo")).unwrap();
+    let config = temp.path().join("config.toml");
+    write_config(&config, &root, &[("agent", &target)]);
+
+    cargo_bin_cmd!("si")
+        .env("SKILLISSUE_CONFIG", config)
+        .args(["disable", "foo", "--dry-run", "--no-color"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("DISABLE"))
+        .stdout(predicate::str::contains("Dry run; no files changed."));
+    assert!(target.join("foo").is_symlink());
+}
+
+#[cfg(unix)]
+#[test]
+fn toggles_refuse_foreign_links_and_physical_copies() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("root");
+    let target = temp.path().join("target");
+    let foreign = temp.path().join("foreign");
+    skill(&root.join("foo"), "canonical");
+    skill(&foreign, "foreign");
+    fs::create_dir_all(&target).unwrap();
+    std::os::unix::fs::symlink(&foreign, target.join("foo")).unwrap();
+    let config = temp.path().join("config.toml");
+    write_config(&config, &root, &[("agent", &target)]);
+
+    cargo_bin_cmd!("si")
+        .env("SKILLISSUE_CONFIG", &config)
+        .args(["disable", "foo", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "refusing to remove foreign symlink",
+        ));
+    assert!(target.join("foo").is_symlink());
+
+    fs::remove_file(target.join("foo")).unwrap();
+    skill(&target.join("foo"), "physical");
+    cargo_bin_cmd!("si")
+        .env("SKILLISSUE_CONFIG", config)
+        .args(["enable", "foo", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "refusing to replace physical directory",
+        ));
+    assert!(target.join("foo").is_dir());
+}
+
+#[test]
+fn toggles_reject_missing_canonical_skills() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("root");
+    let target = temp.path().join("target");
+    fs::create_dir_all(&root).unwrap();
+    fs::create_dir_all(&target).unwrap();
+    let config = temp.path().join("config.toml");
+    write_config(&config, &root, &[("agent", &target)]);
+    cargo_bin_cmd!("si")
+        .env("SKILLISSUE_CONFIG", config)
+        .args(["enable", "missing", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("canonical skill does not exist"));
 }
 
 #[test]

@@ -30,6 +30,12 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
+    /// Open the interactive skill dashboard.
+    Tui {
+        /// Include project-local .claude and .agents skills.
+        #[arg(long, value_name = "PATH", num_args = 0..=1, default_missing_value = ".")]
+        project: Option<PathBuf>,
+    },
     /// Configure the canonical skill directory.
     Init { root: Option<PathBuf> },
     /// Scan configured skill locations without changing them.
@@ -61,6 +67,10 @@ pub enum Command {
     Link(LinkArgs),
     /// Remove managed links without removing canonical skills.
     Unlink(UnlinkArgs),
+    /// Hide a canonical skill from every configured agent.
+    Disable { skill: String },
+    /// Expose a canonical skill to every configured agent.
+    Enable { skill: String },
     /// List or edit target directories.
     Targets {
         #[command(subcommand)]

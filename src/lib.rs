@@ -16,6 +16,7 @@ use walkdir::{DirEntry, WalkDir};
 
 mod cli;
 mod model;
+mod tui;
 
 pub use cli::Cli;
 use cli::{Command, ConfigCommand, LinkArgs, TargetCommand, UnlinkArgs};
@@ -92,7 +93,7 @@ pub fn run(cli: Cli) -> Result<u8> {
             let config = match Config::load() {
                 Ok(config) => config,
                 Err(error) if is_missing_config(&error) => {
-                    eprintln!("skillissue is not configured. Run `si init`. ");
+                    eprintln!("skill-issue is not configured. Run `si init`. ");
                     return Ok(EXIT_CONFIG);
                 }
                 Err(error) => {
@@ -105,6 +106,7 @@ pub fn run(cli: Cli) -> Result<u8> {
                 return Ok(EXIT_CONFIG);
             }
             match command {
+                Command::Tui { project } => tui::run(config, project, cli.dry_run, cli.no_color),
                 Command::Scan { project } => scan_command(&config, project.as_deref()),
                 Command::Adopt { skill } => {
                     adopt_command(&config, skill.as_deref(), cli.dry_run, true)
@@ -114,6 +116,12 @@ pub fn run(cli: Cli) -> Result<u8> {
                 Command::Diff { skill, content } => diff_command(&config, &skill, content),
                 Command::Link(args) => link_command(&config, args, cli.dry_run),
                 Command::Unlink(args) => unlink_command(&config, args, cli.dry_run),
+                Command::Disable { skill } => {
+                    toggle_skill_command(&config, &skill, false, cli.dry_run)
+                }
+                Command::Enable { skill } => {
+                    toggle_skill_command(&config, &skill, true, cli.dry_run)
+                }
                 Command::Targets { command } => targets_command(config, command, cli.dry_run),
                 Command::Config { command } => config_command(config, command, cli.dry_run),
                 Command::Restore => restore_command(&config, cli.dry_run),
@@ -284,7 +292,7 @@ fn init(root: Option<PathBuf>, dry_run: bool) -> Result<u8> {
     if config_path.exists() {
         let current = Config::load()?;
         if current.root == config.root {
-            println!("skillissue is already configured with {}", root.display());
+            println!("skill-issue is already configured with {}", root.display());
             return Ok(EXIT_OK);
         }
         bail!(
@@ -918,7 +926,7 @@ fn status_command(config: &Config, include_git: bool) -> Result<u8> {
         );
         return Ok(code);
     }
-    println!("{}", Style::new().bold().apply_to("skillissue"));
+    println!("{}", Style::new().bold().apply_to("skill-issue"));
     println!("{}", Style::new().bold().apply_to("Canonical"));
     println!("  {}", display_path(&config.root));
     println!("{canonical} skills");
@@ -1084,7 +1092,7 @@ fn default_command(dry_run: bool) -> Result<u8> {
     let config = match Config::load() {
         Ok(config) => config,
         Err(error) if is_missing_config(&error) => {
-            eprintln!("skillissue is not configured. Run `si init`. ");
+            eprintln!("skill-issue is not configured. Run `si init`. ");
             return Ok(EXIT_CONFIG);
         }
         Err(error) => {
@@ -2075,7 +2083,7 @@ fn doctor_command(config: &Config, fix: bool, dry_run: bool) -> Result<u8> {
         );
         return Ok(code);
     }
-    println!("Checking skillissue...");
+    println!("Checking skill-issue...");
     let root_ok = config.root.is_dir();
     println!(
         "{} Canonical directory {}",
@@ -2673,6 +2681,204 @@ fn unlink_command(config: &Config, args: UnlinkArgs, dry_run: bool) -> Result<u8
         fs::remove_file(&path)?;
         println!("{} Removed {}", style("✓").green(), path.display());
     }
+    Ok(EXIT_OK)
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct SkillTogglePlan {
+    pub skill: String,
+    pub enable: bool,
+    actions: Vec<SkillToggleAction>,
+    create_targets: Vec<PathBuf>,
+    relative_links: bool,
+}
+
+#[derive(Clone, Debug)]
+enum SkillToggleAction {
+    Link {
+        path: PathBuf,
+        canonical: PathBuf,
+    },
+    Unlink {
+        path: PathBuf,
+        raw_target: PathBuf,
+        canonical: PathBuf,
+    },
+}
+
+impl SkillTogglePlan {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.actions.is_empty()
+    }
+
+    pub(crate) fn action_count(&self) -> usize {
+        self.actions.len()
+    }
+
+    pub(crate) fn paths(&self) -> impl Iterator<Item = &Path> {
+        self.actions.iter().map(|action| match action {
+            SkillToggleAction::Link { path, .. } | SkillToggleAction::Unlink { path, .. } => {
+                path.as_path()
+            }
+        })
+    }
+
+    pub(crate) fn apply(&self) -> Result<()> {
+        if self.enable {
+            self.apply_links()
+        } else {
+            self.apply_unlinks()
+        }
+    }
+
+    fn apply_links(&self) -> Result<()> {
+        for path in &self.create_targets {
+            fs::create_dir_all(path).with_context(|| format!("create {}", path.display()))?;
+        }
+        let mut created = Vec::new();
+        for action in &self.actions {
+            let SkillToggleAction::Link { path, canonical } = action else {
+                continue;
+            };
+            if let Err(error) = create_managed_symlink(canonical, path, self.relative_links)
+                .and_then(|_| verify_link(path, canonical))
+            {
+                for created_path in created.iter().rev() {
+                    let _ = fs::remove_file(created_path);
+                }
+                return Err(error).context("enable operation rolled back");
+            }
+            created.push(path.clone());
+        }
+        Ok(())
+    }
+
+    fn apply_unlinks(&self) -> Result<()> {
+        let mut removed = Vec::<(PathBuf, PathBuf)>::new();
+        for action in &self.actions {
+            let SkillToggleAction::Unlink {
+                path,
+                raw_target,
+                canonical,
+            } = action
+            else {
+                continue;
+            };
+            if let Err(error) = verify_link(path, canonical).and_then(|_| {
+                fs::remove_file(path).with_context(|| format!("remove {}", path.display()))
+            }) {
+                for (removed_path, removed_target) in removed.iter().rev() {
+                    let _ = create_symlink(removed_target, removed_path);
+                }
+                return Err(error).context("disable operation rolled back");
+            }
+            removed.push((path.clone(), raw_target.clone()));
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn plan_skill_toggle(
+    config: &Config,
+    skill: &str,
+    enable: bool,
+) -> Result<SkillTogglePlan> {
+    validate_skill_name(skill)?;
+    let canonical = config.root.join(skill);
+    let metadata = fs::symlink_metadata(&canonical)
+        .with_context(|| format!("canonical skill does not exist: {}", canonical.display()))?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        bail!(
+            "canonical skill does not exist as a real directory: {}",
+            canonical.display()
+        );
+    }
+
+    let mut actions = Vec::new();
+    let mut create_targets = BTreeSet::new();
+    for target in config.targets.values().filter(|target| target.enabled) {
+        let path = target.path.join(skill);
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                let raw_target = fs::read_link(&path)?;
+                let resolved = resolve_link_path(&path, &raw_target);
+                if resolved != canonical {
+                    bail!(
+                        "refusing to {} foreign symlink {}",
+                        if enable { "replace" } else { "remove" },
+                        path.display()
+                    );
+                }
+                if !enable {
+                    actions.push(SkillToggleAction::Unlink {
+                        path,
+                        raw_target,
+                        canonical: canonical.clone(),
+                    });
+                }
+            }
+            Ok(_) => bail!(
+                "refusing to {} physical directory {}",
+                if enable { "replace" } else { "remove" },
+                path.display()
+            ),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                if enable {
+                    if !target.path.exists() {
+                        create_targets.insert(target.path.clone());
+                    }
+                    actions.push(SkillToggleAction::Link {
+                        path,
+                        canonical: canonical.clone(),
+                    });
+                }
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+
+    Ok(SkillTogglePlan {
+        skill: skill.to_string(),
+        enable,
+        actions,
+        create_targets: create_targets.into_iter().collect(),
+        relative_links: config.relative_links,
+    })
+}
+
+fn toggle_skill_command(config: &Config, skill: &str, enable: bool, dry_run: bool) -> Result<u8> {
+    let plan = plan_skill_toggle(config, skill, enable)?;
+    let verb = if enable { "ENABLE" } else { "DISABLE" };
+    if plan.is_empty() {
+        println!(
+            "{skill} is already {}.",
+            if enable { "enabled" } else { "disabled" }
+        );
+        return Ok(EXIT_OK);
+    }
+    println!("{}", Style::new().bold().apply_to("PLAN"));
+    for path in plan.paths() {
+        println!("{verb}  {}", path.display());
+    }
+    println!(
+        "Canonical skill remains: {}",
+        config.root.join(skill).display()
+    );
+    if dry_run {
+        println!("Dry run; no files changed.");
+        return Ok(EXIT_OK);
+    }
+    require_confirmation(&format!(
+        "{} {skill} for all configured agents?",
+        if enable { "Enable" } else { "Disable" }
+    ))?;
+    plan.apply()?;
+    println!(
+        "{} {skill} {} for {} agents",
+        style("✓").green(),
+        if enable { "enabled" } else { "disabled" },
+        plan.action_count()
+    );
     Ok(EXIT_OK)
 }
 

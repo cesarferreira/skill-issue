@@ -1,5 +1,5 @@
 <div align="center">
-  <h1>skillissue</h1>
+  <h1>skill-issue</h1>
 
   <p><strong>Deduplicate agent skills with safe canonical symlinks</strong></p>
 
@@ -15,6 +15,8 @@
     <a href="#install">Install</a>
     &nbsp;·&nbsp;
     <a href="#quickstart">Quickstart</a>
+    &nbsp;·&nbsp;
+    <a href="#tui">TUI</a>
   </p>
 </div>
 
@@ -46,6 +48,9 @@ si init ~/code/skills
 # Inspect skills found in Claude Code, Codex, Gemini, and .agents.
 si scan
 
+# Browse every skill and agent in the interactive control center.
+si tui
+
 # Preview the exact migration without changing anything.
 si adopt --dry-run
 
@@ -56,7 +61,7 @@ si
 si doctor
 ```
 
-`skillissue` compares directory contents rather than timestamps. Identical
+`skill-issue` compares directory contents rather than timestamps. Identical
 copies are moved into the canonical directory and their original locations are
 replaced with symlinks. Divergent copies are never overwritten: the guided flow
 asks which version to adopt or lets you keep each version under a separate
@@ -67,6 +72,36 @@ selected copy.
 Once everything is healthy, `si` returns to its natural state: quietly judging
 your filesystem with `✓ No skill issues.`
 
+<a id="tui"></a>
+## Interactive TUI
+
+Run `si tui` for a visual overview of canonical skills, installations, agent
+coverage, conflicts, and broken links:
+
+```text
+ ◆ skill-issue  SKILL CONTROL CENTER
+  18 skills    16 managed    1 conflict    4 agents
+  SKILLS       AGENTS        HEALTH
+ ┌ Skills ──────────────────────┐┌ Details ──────────────────────┐
+ │ MANAGED   android-cli    4/4 ││ android-cli                   │
+ │ DISABLED  old-workflow   0/4 ││ ● claude     managed link    │
+ │ CONFLICT  release-notes  2/4 ││ ● codex      managed link    │
+ └──────────────────────────────┘└───────────────────────────────┘
+```
+
+- `↑`/`↓` or `j`/`k` navigates; `/` filters skills.
+- `Tab` switches between Skills, Agents, and Health views.
+- `d` previews and confirms enable/disable for the selected canonical skill.
+- `r` rescans the filesystem; `?` opens the complete keyboard guide.
+- `si tui --project .` includes project-local `.claude` and `.agents` skills.
+- `--dry-run` keeps action previews fully read-only, and `--no-color` uses a
+  monochrome theme.
+
+Disabling removes only verified, managed symlinks from every configured agent.
+The canonical skill is never deleted. Re-enable it from the TUI or with
+`si enable <skill>`. The equivalent non-interactive preview is
+`si disable <skill> --dry-run`.
+
 Common follow-up operations:
 
 ```bash
@@ -76,6 +111,8 @@ si link rust-cli --all
 si link --all
 si link rust-cli --target gemini
 si unlink rust-cli --target gemini
+si disable rust-cli
+si enable rust-cli
 ```
 
 Every mutating command supports `--dry-run`. Colour is disabled by `NO_COLOR`
