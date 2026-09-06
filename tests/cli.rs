@@ -992,6 +992,109 @@ fn link_one_skill_all_targets_and_unlink_target_flag_are_supported() {
     assert!(!codex.join("foo").exists());
 }
 
+#[test]
+fn help_is_themed_unless_colour_is_declined() {
+    cargo_bin_cmd!("si")
+        .env_remove("NO_COLOR")
+        .env("CLICOLOR_FORCE", "1")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\u{1b}[38;5;141mUsage:"));
+    for args in [
+        vec!["--help", "--no-color"],
+        vec!["--help"], // NO_COLOR stays set below
+    ] {
+        let mut command = cargo_bin_cmd!("si");
+        command.env("CLICOLOR_FORCE", "1").args(&args);
+        if args.contains(&"--no-color") {
+            command.env_remove("NO_COLOR");
+        } else {
+            command.env("NO_COLOR", "1");
+        }
+        command
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("\u{1b}[").not())
+            .stdout(predicate::str::contains("Usage: si"));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn status_paints_the_dashboard_when_the_terminal_supports_colour() {
+    let (temp, config, _) = coverage_fixture();
+    cargo_bin_cmd!("si")
+        .env("SKILLISSUE_CONFIG", &config)
+        .env_remove("NO_COLOR")
+        .env("CLICOLOR_FORCE", "1")
+        .arg("status")
+        .assert()
+        .code(2)
+        .stdout(predicate::str::contains("\u{1b}[38;5;"))
+        .stdout(predicate::str::contains("█"))
+        .stdout(predicate::str::contains("Claude"));
+    drop(temp);
+}
+
+#[cfg(unix)]
+#[test]
+fn no_color_and_the_no_color_variable_both_keep_output_free_of_escapes() {
+    let (temp, config, _) = coverage_fixture();
+    for (args, no_color_env) in [
+        (vec!["status", "--no-color"], None),
+        (vec!["status"], Some("1")),
+    ] {
+        let mut command = cargo_bin_cmd!("si");
+        command
+            .env("SKILLISSUE_CONFIG", &config)
+            .env("CLICOLOR_FORCE", "1")
+            .args(&args);
+        match no_color_env {
+            Some(value) => command.env("NO_COLOR", value),
+            None => command.env_remove("NO_COLOR"),
+        };
+        command
+            .assert()
+            .code(2)
+            .stdout(predicate::str::contains("\u{1b}[").not())
+            .stdout(predicate::str::contains("█").not())
+            .stdout(predicate::str::contains("Claude     1/1"));
+    }
+    drop(temp);
+}
+
+#[cfg(unix)]
+#[test]
+fn failures_keep_their_colour_off_stderr_when_colour_is_disabled() {
+    let (temp, config, _) = coverage_fixture();
+    cargo_bin_cmd!("si")
+        .env("SKILLISSUE_CONFIG", &config)
+        .env_remove("NO_COLOR")
+        .env("CLICOLOR_FORCE", "1")
+        .args(["unlink", "missing", "--target", "claude", "--no-color"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("\u{1b}[").not())
+        .stderr(predicate::str::contains("Error:"));
+    drop(temp);
+}
+
+#[cfg(unix)]
+fn coverage_fixture() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("root");
+    let claude = temp.path().join("claude");
+    let codex = temp.path().join("codex");
+    skill(&root.join("foo"), "one");
+    fs::create_dir_all(&claude).unwrap();
+    fs::create_dir_all(&codex).unwrap();
+    std::os::unix::fs::symlink(root.join("foo"), claude.join("foo")).unwrap();
+    let config = temp.path().join("config.toml");
+    write_config(&config, &root, &[("claude", &claude), ("codex", &codex)]);
+    (temp, config, root)
+}
+
 #[cfg(unix)]
 #[test]
 fn status_reports_per_agent_canonical_coverage() {

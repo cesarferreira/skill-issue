@@ -1,12 +1,28 @@
-use clap::{ArgAction, Args, CommandFactory, Parser, Subcommand};
+use clap::builder::styling::{Ansi256Color, Color, Style, Styles};
+use clap::{ArgAction, Args, ColorChoice, CommandFactory, FromArgMatches, Parser, Subcommand};
 use clap_complete::Shell;
 use std::path::PathBuf;
+
+const fn ansi(value: u8) -> Option<Color> {
+    Some(Color::Ansi256(Ansi256Color(value)))
+}
+
+/// Match `--help` to the palette the commands themselves print in.
+const HELP_STYLES: Styles = Styles::styled()
+    .header(Style::new().bold().fg_color(ansi(141)))
+    .usage(Style::new().bold().fg_color(ansi(141)))
+    .literal(Style::new().bold().fg_color(ansi(117)))
+    .placeholder(Style::new().fg_color(ansi(245)))
+    .valid(Style::new().fg_color(ansi(114)))
+    .invalid(Style::new().bold().fg_color(ansi(221)))
+    .error(Style::new().bold().fg_color(ansi(210)));
 
 #[derive(Parser, Debug)]
 #[command(
     name = "si",
     version,
-    about = "Deduplicate agent skills with safe canonical symlinks"
+    about = "Deduplicate agent skills with safe canonical symlinks",
+    styles = HELP_STYLES
 )]
 pub struct Cli {
     /// Print the exact operation plan without changing files.
@@ -137,4 +153,22 @@ pub enum ConfigCommand {
 
 pub fn command() -> clap::Command {
     Cli::command()
+}
+
+/// Parse arguments so `--no-color` also silences clap's own help and errors.
+pub fn parse() -> Cli {
+    let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    let mut command = Cli::command();
+    if colour_is_unwanted(&args) {
+        command = command.color(ColorChoice::Never);
+    }
+    let matches = command.get_matches_from(args);
+    match Cli::from_arg_matches(&matches) {
+        Ok(cli) => cli,
+        Err(error) => error.exit(),
+    }
+}
+
+fn colour_is_unwanted(args: &[std::ffi::OsString]) -> bool {
+    std::env::var_os("NO_COLOR").is_some() || args.iter().any(|arg| arg == "--no-color")
 }

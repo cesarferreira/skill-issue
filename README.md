@@ -16,6 +16,8 @@
     &nbsp;·&nbsp;
     <a href="#quickstart">Quickstart</a>
     &nbsp;·&nbsp;
+    <a href="#colour">Colour</a>
+    &nbsp;·&nbsp;
     <a href="#tui">TUI</a>
   </p>
 </div>
@@ -72,6 +74,32 @@ selected copy.
 Once everything is healthy, `si` returns to its natural state: quietly judging
 your filesystem with `✓ No skill issues.`
 
+<a id="colour"></a>
+## Colour
+
+Every command shares one palette with the TUI, so a glance is usually enough.
+`si status` reads as a dashboard, complete with per-agent coverage meters:
+
+```text
+◆ skill-issue  one true copy of every agent skill
+
+▌ CANONICAL
+  ~/skills
+  18 skills
+  4 agents
+
+▌ COVERAGE
+✓ Claude     18/18 ████████████
+⚠ Codex      12/18 ████████░░░░
+```
+
+Cyan marks counts and paths worth reading, purple marks section headings and
+preserved copies, green means healthy, yellow means repairable, and red means a
+conflict that needs a decision. Plan verbs (`LINK`, `STAGE`, `REMOVE`) are
+coloured by how destructive they are, and `si diff` renders like `git diff`.
+Colour, including `--help`, turns off with `--no-color` or `NO_COLOR`, and can
+be forced through pipes with `CLICOLOR_FORCE=1`.
+
 <a id="tui"></a>
 ## Interactive TUI
 
@@ -116,7 +144,8 @@ si enable rust-cli
 ```
 
 Every mutating command supports `--dry-run`. Colour is disabled by `NO_COLOR`
-or `--no-color`. After reviewing a plan, `--yes` allows safe non-interactive
+or `--no-color` and forced by `CLICOLOR_FORCE=1`. After reviewing a plan,
+`--yes` allows safe non-interactive
 execution; divergent copies still require an interactive choice. With a skill
 name, `link --all` links that skill into every detected agent. Without a skill
 name, it links every canonical skill into every detected agent.
