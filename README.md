@@ -53,8 +53,7 @@ si apply
 | `si status` or `si` | Read-only overview of skills, agent coverage, conflicts, and Git health. |
 | `si tui` | Optional interactive dashboard for inspecting and managing skills. |
 
-Useful advanced commands are `si diff <skill>`, `si targets`, `si config`, and
-`si completions <shell>`.
+Useful advanced commands are `si diff <skill>`, `si targets`, and `si config`.
 
 ## Safety
 
