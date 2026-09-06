@@ -67,7 +67,7 @@ fn build_plan(config: &Config) -> Result<ApplyPlan> {
         remove_stale_links: Vec::new(),
         conflicts: Vec::new(),
     };
-    let skills = canonical_skill_names(&config.root)?;
+    let skills = canonical_skill_names(&config.root, &config.ignore)?;
     for target in config.targets.values().filter(|target| target.enabled) {
         if !target.path.exists() {
             plan.create_targets.insert(target.path.clone());

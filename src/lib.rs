@@ -95,7 +95,11 @@ pub fn run(cli: Cli) -> Result<u8> {
     JSON_OUTPUT.store(cli.json, Ordering::Relaxed);
     ASSUME_YES.store(cli.yes, Ordering::Relaxed);
     match cli.command {
-        Some(Command::Setup { root }) => setup_command(root, cli.dry_run),
+        Some(Command::Setup {
+            root,
+            targets,
+            ignore,
+        }) => setup_command(root, targets, ignore, cli.dry_run),
         Some(command) => {
             let config = match Config::load() {
                 Ok(config) => config,
@@ -265,7 +269,12 @@ fn path_contains(parent: &Path, child: &Path) -> bool {
     child != parent && child.starts_with(parent)
 }
 
-fn init(root: Option<PathBuf>, dry_run: bool) -> Result<u8> {
+fn init(
+    root: Option<PathBuf>,
+    target_args: &[String],
+    ignore_args: &[String],
+    dry_run: bool,
+) -> Result<u8> {
     let root = match root {
         Some(path) => absolute_path(&path)?,
         None if io::stdin().is_terminal() => {
@@ -289,6 +298,7 @@ fn init(root: Option<PathBuf>, dry_run: bool) -> Result<u8> {
             ("agents", ".agents/skills"),
             ("opencode", ".config/opencode/skills"),
             ("hermes", ".hermes/skills"),
+            ("cursor", ".cursor/skills"),
         ] {
             let path = home.join(relative);
             if path.is_dir() {
@@ -302,12 +312,16 @@ fn init(root: Option<PathBuf>, dry_run: bool) -> Result<u8> {
             }
         }
     }
-    let config = Config {
-        root: root.clone(),
-        targets,
-        relative_links: false,
-        ignore: Vec::new(),
-    };
+    let config = merge_setup_inputs(
+        Config {
+            root: root.clone(),
+            targets,
+            relative_links: false,
+            ignore: Vec::new(),
+        },
+        target_args,
+        ignore_args,
+    )?;
     validate_config(&config)?;
     let config_path = Config::path()?;
     if config_path.exists() {
@@ -356,7 +370,12 @@ fn init(root: Option<PathBuf>, dry_run: bool) -> Result<u8> {
     Ok(EXIT_OK)
 }
 
-fn setup_command(root: Option<PathBuf>, dry_run: bool) -> Result<u8> {
+fn setup_command(
+    root: Option<PathBuf>,
+    target_args: Vec<String>,
+    ignore_args: Vec<String>,
+    dry_run: bool,
+) -> Result<u8> {
     let config = match Config::load() {
         Ok(config) => {
             if let Some(root) = root {
@@ -369,10 +388,14 @@ fn setup_command(root: Option<PathBuf>, dry_run: bool) -> Result<u8> {
                     );
                 }
             }
-            config
+            let merged = merge_setup_inputs(config, &target_args, &ignore_args)?;
+            if !dry_run {
+                merged.save()?;
+            }
+            merged
         }
         Err(error) if is_missing_config(&error) => {
-            init(root, dry_run)?;
+            init(root, &target_args, &ignore_args, dry_run)?;
             if dry_run {
                 return Ok(EXIT_OK);
             }
@@ -390,6 +413,52 @@ fn setup_command(root: Option<PathBuf>, dry_run: bool) -> Result<u8> {
     Ok(result_exit(&scan(&config)?))
 }
 
+fn merge_setup_inputs(
+    mut config: Config,
+    target_args: &[String],
+    ignore_args: &[String],
+) -> Result<Config> {
+    build_ignore_set(ignore_args)?;
+    for value in target_args {
+        let (id, path) = parse_setup_target(value)?;
+        match config.targets.get(&id) {
+            Some(existing) if existing.path == path => {}
+            Some(existing) => bail!(
+                "target `{id}` is already configured at {}; remove it before using {}",
+                existing.path.display(),
+                path.display()
+            ),
+            None => {
+                config.targets.insert(
+                    id,
+                    TargetConfig {
+                        path,
+                        enabled: true,
+                    },
+                );
+            }
+        }
+    }
+    for pattern in ignore_args {
+        if !config.ignore.contains(pattern) {
+            config.ignore.push(pattern.clone());
+        }
+    }
+    validate_config(&config)?;
+    Ok(config)
+}
+
+fn parse_setup_target(value: &str) -> Result<(String, PathBuf)> {
+    let (id, path) = value
+        .split_once('=')
+        .ok_or_else(|| anyhow!("target must use ID=PATH: {value}"))?;
+    validate_target_id(id)?;
+    if path.is_empty() {
+        bail!("target path must not be empty: {value}");
+    }
+    Ok((id.to_string(), absolute_path(Path::new(path))?))
+}
+
 pub fn scan(config: &Config) -> Result<ScanResult> {
     let ignores = build_ignore_set(&config.ignore)?;
     let mut groups = BTreeMap::<String, SkillGroup>::new();
@@ -398,7 +467,10 @@ pub fn scan(config: &Config) -> Result<ScanResult> {
         for entry in sorted_children(&config.root)? {
             let kind = entry.file_type()?;
             let name = utf8_name(&entry.path())?;
-            if ignored_top_level(&name) || (!kind.is_dir() && !kind.is_symlink()) {
+            if ignored_top_level(&name)
+                || ignores.is_match(&name)
+                || (!kind.is_dir() && !kind.is_symlink())
+            {
                 continue;
             }
             if kind.is_symlink() {
@@ -429,7 +501,7 @@ pub fn scan(config: &Config) -> Result<ScanResult> {
         let mut count = 0;
         for entry in sorted_children(&target.path)? {
             let name = utf8_name(&entry.path())?;
-            if ignored_top_level(&name) {
+            if ignored_top_level(&name) || ignores.is_match(&name) {
                 continue;
             }
             check_case_collision(&mut logical_names, &name, "configured skill locations")?;
@@ -877,6 +949,7 @@ fn target_label(id: &str) -> String {
         "agents" => "Agents".into(),
         "opencode" => "Opencode".into(),
         "hermes" => "Hermes".into(),
+        "cursor" => "Cursor".into(),
         _ => {
             let mut chars = id.chars();
             chars
@@ -895,7 +968,8 @@ fn target_rank(id: &str) -> u8 {
         "agents" => 3,
         "opencode" => 4,
         "hermes" => 5,
-        _ => 6,
+        "cursor" => 6,
+        _ => 7,
     }
 }
 
@@ -1741,7 +1815,7 @@ fn plan_new(
     installations: Vec<PathBuf>,
 ) -> Result<AdoptionPlan> {
     validate_skill_name(canonical_name)?;
-    if canonical_skill_names(&config.root)?
+    if canonical_skill_names(&config.root, &config.ignore)?
         .iter()
         .any(|name| name.to_lowercase() == canonical_name.to_lowercase())
     {
@@ -2673,7 +2747,7 @@ fn link_command(config: &Config, args: LinkArgs, dry_run: bool) -> Result<u8> {
         bail!("at least one target is required; use --all for every detected target");
     }
     let skills = if all_skills {
-        canonical_skill_names(&config.root)?
+        canonical_skill_names(&config.root, &config.ignore)?
     } else {
         vec![
             args.skill
@@ -2999,12 +3073,17 @@ fn render_sync_check(config: &Config, git: GitHealth, fetched: bool) -> Result<u
     Ok(if synced { EXIT_OK } else { EXIT_ISSUES })
 }
 
-fn canonical_skill_names(root: &Path) -> Result<Vec<String>> {
+fn canonical_skill_names(root: &Path, ignore: &[String]) -> Result<Vec<String>> {
+    let ignores = build_ignore_set(ignore)?;
     let mut names = Vec::new();
     for entry in sorted_children(root)? {
         let metadata = entry.file_type()?;
         let name = utf8_name(&entry.path())?;
-        if metadata.is_dir() && !metadata.is_symlink() && !ignored_top_level(&name) {
+        if metadata.is_dir()
+            && !metadata.is_symlink()
+            && !ignored_top_level(&name)
+            && !ignores.is_match(&name)
+        {
             names.push(name);
         }
     }

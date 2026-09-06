@@ -33,6 +33,16 @@ git clone <your-skills-repository> ~/code/skills
 si setup ~/code/skills
 ```
 
+If a skill source lives outside a standard agent directory, include it during
+the first setup. Ignore names only when you intentionally do not want them
+collected:
+
+```bash
+si setup ~/skills \
+  --target dotfiles=~/dotfiles/agent-skills/.agents/skills \
+  --ignore retired-skill
+```
+
 ## After pulling changes
 
 Git remains responsible for synchronization. `si apply` only reconciles local
