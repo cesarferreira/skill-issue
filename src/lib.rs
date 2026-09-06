@@ -164,7 +164,9 @@ impl Config {
         if let Some(path) = std::env::var_os("SKILLISSUE_CONFIG") {
             return Ok(PathBuf::from(path));
         }
-        let dir = dirs::config_dir()
+        let dir = std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .or_else(|| dirs::home_dir().map(|home| home.join(".config")))
             .ok_or_else(|| anyhow!("could not determine the configuration directory"))?;
         let current = dir.join("skill-issue/config.toml");
         let legacy = dir.join("skillissue/config.toml");
@@ -248,11 +250,21 @@ fn normalize_lexical(path: &Path) -> PathBuf {
     result
 }
 
+fn best_effort_canonical(path: &Path) -> PathBuf {
+    if let Ok(canonical) = fs::canonicalize(path) {
+        return canonical;
+    }
+    match (path.parent(), path.file_name()) {
+        (Some(parent), Some(file_name)) => best_effort_canonical(parent).join(file_name),
+        _ => path.to_path_buf(),
+    }
+}
+
 fn validate_config(config: &Config) -> Result<()> {
     build_ignore_set(&config.ignore)?;
     for (id, target) in config.targets.iter().filter(|(_, t)| t.enabled) {
-        let root = fs::canonicalize(&config.root).unwrap_or_else(|_| config.root.clone());
-        let target_path = fs::canonicalize(&target.path).unwrap_or_else(|_| target.path.clone());
+        let root = best_effort_canonical(&config.root);
+        let target_path = best_effort_canonical(&target.path);
         if root == target_path
             || path_contains(&root, &target_path)
             || path_contains(&target_path, &root)
@@ -293,6 +305,8 @@ fn init(root: Option<PathBuf>, dry_run: bool) -> Result<u8> {
             ("codex", ".codex/skills"),
             ("gemini", ".gemini/skills"),
             ("agents", ".agents/skills"),
+            ("opencode", ".config/opencode/skills"),
+            ("hermes", ".hermes/skills"),
         ] {
             let path = home.join(relative);
             if path.is_dir() {
@@ -846,6 +860,8 @@ fn target_label(id: &str) -> String {
         "codex" => "Codex".into(),
         "gemini" => "Gemini".into(),
         "agents" => "Agents".into(),
+        "opencode" => "Opencode".into(),
+        "hermes" => "Hermes".into(),
         _ => {
             let mut chars = id.chars();
             chars
@@ -862,7 +878,9 @@ fn target_rank(id: &str) -> u8 {
         "codex" => 1,
         "gemini" => 2,
         "agents" => 3,
-        _ => 4,
+        "opencode" => 4,
+        "hermes" => 5,
+        _ => 6,
     }
 }
 
