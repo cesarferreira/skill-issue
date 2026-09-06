@@ -122,7 +122,7 @@ pub fn run(cli: Cli) -> Result<u8> {
             }
             match command {
                 Command::Tui { project } => tui::run(config, project, cli.dry_run, cli.no_color),
-                Command::Sync => apply::run(&config, cli.dry_run),
+                Command::Sync => sync_command(&config, cli.dry_run),
                 Command::Status => status_command(&config, true),
                 Command::Diff { skill, content } => diff_command(&config, &skill, content),
                 Command::Targets { command } => targets_command(config, command, cli.dry_run),
@@ -415,13 +415,22 @@ fn setup_command(
         Err(error) => return Err(error),
     };
     validate_config(&config)?;
-    let result = scan(&config)?;
-    adopt_from_scan(&config, &result, None, dry_run, true)?;
+    println!(
+        "{} Configuration ready. Run {} to collect and reconcile skills.",
+        theme::ok(),
+        theme::hint("si sync")
+    );
+    Ok(EXIT_OK)
+}
+
+fn sync_command(config: &Config, dry_run: bool) -> Result<u8> {
+    let result = scan(config)?;
+    adopt_from_scan(config, &result, None, dry_run, true)?;
     if dry_run {
         return Ok(EXIT_OK);
     }
-    apply::run(&config, false)?;
-    Ok(result_exit(&scan(&config)?))
+    apply::run(config, false)?;
+    Ok(result_exit(&scan(config)?))
 }
 
 fn merge_setup_inputs(
@@ -2896,7 +2905,7 @@ fn restore_command(config: &Config, dry_run: bool) -> Result<u8> {
     )
 }
 
-fn sync_command(config: &Config, check: bool, dry_run: bool) -> Result<u8> {
+fn git_sync_command(config: &Config, check: bool, dry_run: bool) -> Result<u8> {
     if check && dry_run {
         bail!("--check is already read-only and cannot be combined with --dry-run");
     }

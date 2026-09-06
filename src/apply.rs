@@ -19,7 +19,7 @@ pub(crate) fn run(config: &Config, dry_run: bool) -> Result<u8> {
     let plan = build_plan(config)?;
     render_plan(&plan, config);
     if !plan.conflicts.is_empty() {
-        println!("Run: {}", theme::hint("si setup"));
+        println!("Run: {}", theme::hint("si sync"));
         return Ok(EXIT_ISSUES);
     }
     if dry_run {

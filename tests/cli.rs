@@ -125,8 +125,10 @@ fn sync_preserves_divergent_physical_content() {
         .env("SKILL_ISSUE_CONFIG", &config)
         .args(["sync", "--yes", "--no-color"])
         .assert()
-        .code(2)
-        .stdout(predicate::str::contains("si setup"));
+        .failure()
+        .stderr(predicate::str::contains(
+            "divergent skills require an interactive terminal",
+        ));
     assert_eq!(
         fs::read_to_string(target.join("foo/SKILL.md")).unwrap(),
         "local"
@@ -135,7 +137,7 @@ fn sync_preserves_divergent_physical_content() {
 
 #[cfg(unix)]
 #[test]
-fn setup_collects_skills_and_links_every_detected_agent() {
+fn sync_collects_skills_after_setup_only_configures() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("home");
     let claude = home.join(".claude/skills");
@@ -149,6 +151,15 @@ fn setup_collects_skills_and_links_every_detected_agent() {
         .env("HOME", &home)
         .env("SKILL_ISSUE_CONFIG", &config)
         .args(["setup", root.to_str().unwrap(), "--yes", "--no-color"])
+        .assert()
+        .success();
+    assert!(claude.join("claude-only").is_dir());
+    assert!(!root.join("claude-only").exists());
+
+    cargo_bin_cmd!("si")
+        .env("HOME", &home)
+        .env("SKILL_ISSUE_CONFIG", &config)
+        .args(["sync", "--yes", "--no-color"])
         .assert()
         .success();
     for name in ["claude-only", "shared"] {
@@ -185,6 +196,16 @@ fn setup_accepts_custom_targets_and_ignores_before_collection() {
         .assert()
         .success();
 
+    assert!(extra.join("collect-me").is_dir());
+    assert!(!root.join("collect-me").exists());
+
+    cargo_bin_cmd!("si")
+        .env("HOME", &home)
+        .env("SKILL_ISSUE_CONFIG", &config)
+        .args(["sync", "--yes", "--no-color"])
+        .assert()
+        .success();
+
     assert!(root.join("collect-me").is_dir());
     assert!(extra.join("collect-me").is_symlink());
     assert!(extra.join("retired").is_dir());
@@ -210,6 +231,15 @@ fn setup_discovers_cursor_skills() {
         .args(["setup", root.to_str().unwrap(), "--yes", "--no-color"])
         .assert()
         .success();
+    assert!(cursor.join("cursor-only").is_dir());
+    assert!(!root.join("cursor-only").exists());
+
+    cargo_bin_cmd!("si")
+        .env("HOME", &home)
+        .env("SKILL_ISSUE_CONFIG", &config)
+        .args(["sync", "--yes", "--no-color"])
+        .assert()
+        .success();
 
     assert!(root.join("cursor-only").is_dir());
     assert!(cursor.join("cursor-only").is_symlink());
@@ -222,7 +252,7 @@ fn setup_discovers_cursor_skills() {
 
 #[cfg(unix)]
 #[test]
-fn first_setup_dry_run_renders_the_collection_plan() {
+fn first_setup_dry_run_only_previews_configuration() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("home");
     let root = home.join("skills");
@@ -235,8 +265,7 @@ fn first_setup_dry_run_renders_the_collection_plan() {
         .args(["setup", root.to_str().unwrap(), "--dry-run", "--no-color"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("COPY"))
-        .stdout(predicate::str::contains("LINK"));
+        .stdout(predicate::str::contains("Run si sync"));
 
     assert!(!root.exists());
     assert!(!config.exists());
@@ -256,6 +285,14 @@ fn setup_links_an_existing_canonical_directory() {
         .env("HOME", &home)
         .env("SKILL_ISSUE_CONFIG", &config)
         .args(["setup", root.to_str().unwrap(), "--yes", "--no-color"])
+        .assert()
+        .success();
+    assert!(!claude.join("foo").is_symlink());
+
+    cargo_bin_cmd!("si")
+        .env("HOME", &home)
+        .env("SKILL_ISSUE_CONFIG", &config)
+        .args(["sync", "--yes", "--no-color"])
         .assert()
         .success();
     assert_eq!(

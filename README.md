@@ -8,12 +8,13 @@ Your agents have a skill issue. Fortunately, it is mostly symlinks.
 
 ## First computer
 
-`setup` finds the skills already installed in your agents, moves one copy of
-each into a canonical directory, and links every detected agent back to it.
+`setup` configures the canonical directory and detects installed agents. `sync`
+then collects local skills into that directory and reconciles every agent link.
 It compares content, never timestamps, and asks before resolving a conflict.
 
 ```bash
 si setup ~/code/skills
+si sync
 
 cd ~/code/skills
 git init
@@ -31,6 +32,7 @@ create their links.
 ```bash
 git clone <your-skills-repository> ~/code/skills
 si setup ~/code/skills
+si sync
 ```
 
 If a skill source lives outside a standard agent directory, include it during
@@ -41,6 +43,7 @@ collected:
 si setup ~/skills \
   --target dotfiles=~/dotfiles/agent-skills/.agents/skills \
   --ignore retired-skill
+si sync
 ```
 
 ## After pulling changes
@@ -75,19 +78,19 @@ si sync
 ```
 
 If a new skill is installed directly into an agent directory, collect it with
-`setup`. It shows a plan, moves the physical copy into the canonical directory,
+`sync`. It shows a plan, moves the physical copy into the canonical directory,
 and links it back to its original agent directory:
 
 ```bash
-si setup
+si sync
 ```
 
 ## Everyday commands
 
 | Command | What it does |
 | --- | --- |
-| `si setup [PATH]` | Configure a canonical directory, collect local skills, and link detected agents. |
-| `si sync` | Reconcile canonical skills into every configured agent. Run after `git pull`. |
+| `si setup [PATH]` | Configure a canonical directory and detect local agent targets. |
+| `si sync` | Collect local skills and reconcile canonical skills into every configured agent. |
 | `si status` or `si` | Read-only overview of skills, agent coverage, conflicts, and Git health. |
 | `si tui` | Optional interactive dashboard for inspecting and managing skills. |
 

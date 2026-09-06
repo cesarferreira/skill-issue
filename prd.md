@@ -60,25 +60,27 @@ machines.
 
 ```bash
 si setup ~/code/skills
+si sync
 cd ~/code/skills
 git init
 git add .
 git commit -m "Add skills"
 ```
 
-`setup` configures the canonical root, detects existing agent skill locations,
-compares physical skill directories, moves safe candidates into the root, and
-replaces copies with links. It also links canonical skills into every detected
-agent target.
+`setup` configures the canonical root and detects existing agent skill
+locations. `sync` compares physical skill directories, moves safe candidates
+into the root, replaces copies with links, and links canonical skills into
+every detected agent target.
 
 ### New computer
 
 ```bash
 git clone <your-skills-repository> ~/code/skills
 si setup ~/code/skills
+si sync
 ```
 
-When the canonical directory already contains skills, `setup` treats it as the
+When the canonical directory already contains skills, `sync` treats it as the
 authority and creates local links for detected agents.
 
 ### Everyday updates
@@ -88,10 +90,11 @@ git -C ~/code/skills pull
 si sync
 ```
 
-`sync` reconciles the canonical directory into the configured agent targets.
-It creates missing links, repairs managed links, replaces identical physical
-copies, and removes stale managed links for canonical skills removed through
-Git. It does not collect divergent local content and does not run Git.
+`sync` collects unambiguous physical skill directories into the canonical
+directory, then reconciles it into configured agent targets. It creates missing
+links, repairs managed links, replaces identical physical copies, and removes
+stale managed links. It does not collect divergent local content and does not
+run Git.
 
 ## Public CLI
 
@@ -159,11 +162,11 @@ wrapper.
 
 ## Acceptance criteria
 
-Given identical copies under Claude, Codex, and Gemini, `si setup` produces one
+Given identical copies under Claude, Codex, and Gemini, `si sync` produces one
 real canonical directory and symlinks at all three original paths. All original
 files remain accessible through their links.
 
-Given a cloned canonical repository and installed local agents, `si setup`
+Given a cloned canonical repository and installed local agents, `si sync`
 links every canonical skill into each detected target without moving canonical
 content.
 
