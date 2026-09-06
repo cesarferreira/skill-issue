@@ -472,10 +472,9 @@ fn empty_group(name: &str) -> SkillGroup {
 }
 
 fn ignored_top_level(name: &str) -> bool {
-    name == ".git"
-        || name == ".DS_Store"
-        || name.starts_with(".skill-issue-")
-        || name.starts_with(".skillissue-")
+    // Skills are directories or symlinks with real names; agents sometimes drop
+    // their own bookkeeping files (manifests, caches, markers) alongside them.
+    name.starts_with('.')
 }
 
 fn inspect_installation(
