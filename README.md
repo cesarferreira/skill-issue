@@ -39,8 +39,8 @@ skillissue --help
 <summary><strong>Build from source</strong> — for development or unreleased changes</summary>
 
 ```bash
-git clone https://github.com/cesarferreira/skillissue.git
-cd skillissue
+git clone https://github.com/cesarferreira/skill-issue.git
+cd skill-issue
 cargo install --path . --locked
 # or
 make install-release
