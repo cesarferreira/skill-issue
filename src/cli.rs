@@ -1,6 +1,5 @@
 use clap::builder::styling::{Ansi256Color, Color, Style, Styles};
 use clap::{ArgAction, Args, ColorChoice, CommandFactory, FromArgMatches, Parser, Subcommand};
-use clap_complete::Shell;
 use std::path::PathBuf;
 
 const fn ansi(value: u8) -> Option<Color> {
@@ -74,8 +73,6 @@ pub enum Command {
         #[command(subcommand)]
         command: Option<ConfigCommand>,
     },
-    /// Generate shell completion definitions.
-    Completions { shell: Shell },
 }
 
 #[derive(Args, Debug)]

@@ -2,7 +2,6 @@
 
 use anyhow::{Context, Result, anyhow, bail};
 use blake3::Hasher;
-use clap_complete::generate;
 use dialoguer::{Confirm, Input, Select, theme::ColorfulTheme};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use serde::Serialize;
@@ -97,11 +96,6 @@ pub fn run(cli: Cli) -> Result<u8> {
     ASSUME_YES.store(cli.yes, Ordering::Relaxed);
     match cli.command {
         Some(Command::Setup { root }) => setup_command(root, cli.dry_run),
-        Some(Command::Completions { shell }) => {
-            let mut command = cli::command();
-            generate(shell, &mut command, "si", &mut io::stdout());
-            Ok(EXIT_OK)
-        }
         Some(command) => {
             let config = match Config::load() {
                 Ok(config) => config,
@@ -129,7 +123,6 @@ pub fn run(cli: Cli) -> Result<u8> {
                 Command::Diff { skill, content } => diff_command(&config, &skill, content),
                 Command::Targets { command } => targets_command(config, command, cli.dry_run),
                 Command::Config { command } => config_command(config, command, cli.dry_run),
-                Command::Completions { .. } => unreachable!(),
                 Command::Setup { .. } => unreachable!(),
             }
         }

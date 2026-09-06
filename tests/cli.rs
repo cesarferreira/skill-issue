@@ -23,14 +23,7 @@ fn help_lists_only_the_simple_public_workflows() {
     let output = cargo_bin_cmd!("si").arg("--help").output().unwrap();
     let help = String::from_utf8(output.stdout).unwrap();
     for command in [
-        "setup",
-        "apply",
-        "status",
-        "tui",
-        "diff",
-        "targets",
-        "config",
-        "completions",
+        "setup", "apply", "status", "tui", "diff", "targets", "config",
     ] {
         assert!(
             help.contains(&format!("  {command}")),
@@ -38,8 +31,18 @@ fn help_lists_only_the_simple_public_workflows() {
         );
     }
     for removed in [
-        "init", "scan", "adopt", "doctor", "link", "unlink", "enable", "disable", "delete",
-        "restore", "sync",
+        "init",
+        "scan",
+        "adopt",
+        "doctor",
+        "link",
+        "unlink",
+        "enable",
+        "disable",
+        "delete",
+        "restore",
+        "sync",
+        "completions",
     ] {
         assert!(
             !help.contains(&format!("  {removed}")),

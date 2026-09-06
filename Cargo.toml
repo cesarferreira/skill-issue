@@ -17,7 +17,6 @@ anyhow = "1"
 blake3 = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = { version = "4", features = ["derive"] }
-clap_complete = "4"
 console = "0.16"
 crossterm = "0.28"
 dialoguer = "0.12"

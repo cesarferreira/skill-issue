@@ -103,7 +103,6 @@ si tui
 si diff <SKILL>
 si targets [COMMAND]
 si config [COMMAND]
-si completions <SHELL>
 ```
 
 Bare `si` is exactly `si status`. It is always read-only.
