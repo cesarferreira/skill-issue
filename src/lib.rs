@@ -122,7 +122,7 @@ pub fn run(cli: Cli) -> Result<u8> {
             }
             match command {
                 Command::Tui { project } => tui::run(config, project, cli.dry_run, cli.no_color),
-                Command::Apply => apply::run(&config, cli.dry_run),
+                Command::Sync => apply::run(&config, cli.dry_run),
                 Command::Status => status_command(&config, true),
                 Command::Diff { skill, content } => diff_command(&config, &skill, content),
                 Command::Targets { command } => targets_command(config, command, cli.dry_run),
@@ -1163,7 +1163,7 @@ fn status_command(config: &Config, include_git: bool) -> Result<u8> {
                 theme::warn_count(canonical - count)
             );
         }
-        println!("Run: {}", theme::hint("si apply"));
+        println!("Run: {}", theme::hint("si sync"));
     }
     if let Some(git) = git {
         print_git_health(&git, &config.root);
@@ -2466,7 +2466,7 @@ fn doctor_command(config: &Config, fix: bool, dry_run: bool) -> Result<u8> {
         println!("{}", theme::dim("Dry run; no files changed."));
         return Ok(result_exit(&result));
     }
-    require_confirmation("Apply these unambiguous repairs?")?;
+    require_confirmation("Perform these unambiguous repairs?")?;
     for plan in &adoptions {
         execute_adoption(plan)?;
     }
@@ -2970,7 +2970,7 @@ fn sync_command(config: &Config, check: bool, dry_run: bool) -> Result<u8> {
         "{}   canonical skills into every enabled target",
         theme::action("RELINK")
     );
-    require_confirmation_with_default("Apply this sync?", true)?;
+    require_confirmation_with_default("Synchronize now?", true)?;
 
     if behind > 0 {
         run_git_checked(

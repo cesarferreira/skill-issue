@@ -85,10 +85,10 @@ authority and creates local links for detected agents.
 
 ```bash
 git -C ~/code/skills pull
-si apply
+si sync
 ```
 
-`apply` reconciles the canonical directory into the configured agent targets.
+`sync` reconciles the canonical directory into the configured agent targets.
 It creates missing links, repairs managed links, replaces identical physical
 copies, and removes stale managed links for canonical skills removed through
 Git. It does not collect divergent local content and does not run Git.
@@ -97,7 +97,7 @@ Git. It does not collect divergent local content and does not run Git.
 
 ```text
 si setup [SKILLS_DIR]
-si apply
+si sync
 si status
 si tui
 si diff <SKILL>
@@ -148,7 +148,7 @@ When the root is a Git repository it also reports read-only working-tree and
 upstream health based on local Git refs.
 
 `si diff <skill>` compares divergent copies. Status should recommend one next
-step: `si setup` for uncollected content, `si apply` for repairable link drift,
+step: `si setup` for uncollected content, `si sync` for repairable link drift,
 or `si diff <skill>` for a conflict.
 
 ## Non-goals
@@ -167,10 +167,10 @@ Given a cloned canonical repository and installed local agents, `si setup`
 links every canonical skill into each detected target without moving canonical
 content.
 
-Given a later `git pull` that adds or removes skills, `si apply` creates the
+Given a later `git pull` that adds or removes skills, `si sync` creates the
 corresponding links and removes only stale managed links.
 
-Given divergent physical content or a foreign symlink, `si apply` leaves it
+Given divergent physical content or a foreign symlink, `si sync` leaves it
 unchanged and exits with an actionable issue report.
 
 When every enabled agent points to canonical skills, `si status` ends with:

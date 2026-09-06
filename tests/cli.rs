@@ -23,7 +23,7 @@ fn help_lists_only_the_simple_public_workflows() {
     let output = cargo_bin_cmd!("si").arg("--help").output().unwrap();
     let help = String::from_utf8(output.stdout).unwrap();
     for command in [
-        "setup", "apply", "status", "tui", "diff", "targets", "config",
+        "setup", "sync", "status", "tui", "diff", "targets", "config",
     ] {
         assert!(
             help.contains(&format!("  {command}")),
@@ -41,7 +41,7 @@ fn help_lists_only_the_simple_public_workflows() {
         "disable",
         "delete",
         "restore",
-        "sync",
+        "apply",
         "completions",
     ] {
         assert!(
@@ -55,7 +55,7 @@ fn help_lists_only_the_simple_public_workflows() {
 fn removed_commands_are_rejected_without_compatibility_aliases() {
     for command in [
         "init", "scan", "adopt", "doctor", "link", "unlink", "enable", "disable", "delete",
-        "restore", "sync",
+        "restore", "apply",
     ] {
         cargo_bin_cmd!("si").arg(command).assert().failure();
     }
@@ -93,7 +93,7 @@ fn status_names_the_canonical_root_when_it_is_not_a_git_repository() {
 
 #[cfg(unix)]
 #[test]
-fn apply_reconciles_links_and_stale_managed_links() {
+fn sync_reconciles_links_and_stale_managed_links() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("root");
     let target = temp.path().join("target");
@@ -104,7 +104,7 @@ fn apply_reconciles_links_and_stale_managed_links() {
     write_config(&config, &root, &[("agent", &target)]);
     cargo_bin_cmd!("si")
         .env("SKILL_ISSUE_CONFIG", &config)
-        .args(["apply", "--yes", "--no-color"])
+        .args(["sync", "--yes", "--no-color"])
         .assert()
         .success();
     assert!(target.join("foo").is_symlink());
@@ -113,7 +113,7 @@ fn apply_reconciles_links_and_stale_managed_links() {
 
 #[cfg(unix)]
 #[test]
-fn apply_preserves_divergent_physical_content() {
+fn sync_preserves_divergent_physical_content() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("root");
     let target = temp.path().join("target");
@@ -123,7 +123,7 @@ fn apply_preserves_divergent_physical_content() {
     write_config(&config, &root, &[("agent", &target)]);
     cargo_bin_cmd!("si")
         .env("SKILL_ISSUE_CONFIG", &config)
-        .args(["apply", "--yes", "--no-color"])
+        .args(["sync", "--yes", "--no-color"])
         .assert()
         .code(2)
         .stdout(predicate::str::contains("si setup"));
