@@ -47,7 +47,7 @@ si --help
 # Choose where the one true copies will live. No council required.
 si init ~/code/skills
 
-# Inspect skills found in Claude Code, Codex, Gemini, and .agents.
+# Inspect skills found in Claude Code, Codex, Gemini, opencode, and .agents.
 si scan
 
 # Browse every skill and agent in the interactive control center.
