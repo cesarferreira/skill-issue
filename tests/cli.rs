@@ -72,6 +72,25 @@ fn missing_configuration_points_to_setup() {
         .stderr(predicate::str::contains("si setup"));
 }
 
+#[test]
+fn status_names_the_canonical_root_when_it_is_not_a_git_repository() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("skills");
+    fs::create_dir_all(&root).unwrap();
+    let config = temp.path().join("config.toml");
+    write_config(&config, &root, &[]);
+
+    cargo_bin_cmd!("si")
+        .env("SKILL_ISSUE_CONFIG", config)
+        .args(["status", "--no-color"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!(
+            "Canonical root is not a Git repository: {}",
+            root.display()
+        )));
+}
+
 #[cfg(unix)]
 #[test]
 fn apply_reconciles_links_and_stale_managed_links() {

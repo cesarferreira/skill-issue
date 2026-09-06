@@ -1090,7 +1090,7 @@ fn status_command(config: &Config, include_git: bool) -> Result<u8> {
         println!("Run: {}", theme::hint("si apply"));
     }
     if let Some(git) = git {
-        print_git_health(&git);
+        print_git_health(&git, &config.root);
     }
     Ok(code)
 }
@@ -1175,10 +1175,14 @@ fn git_output(root: &Path, args: &[&str]) -> Result<std::process::Output> {
         .with_context(|| format!("run `git {}` in {}", args.join(" "), root.display()))
 }
 
-fn print_git_health(git: &GitHealth) {
+fn print_git_health(git: &GitHealth, root: &Path) {
     println!("\n{}", theme::heading("GIT"));
     if !git.repository {
-        println!("{} Canonical root is not a Git repository", theme::warn());
+        println!(
+            "{} Canonical root is not a Git repository: {}",
+            theme::warn(),
+            theme::path(root)
+        );
         return;
     }
     println!("{} repository", theme::ok());
@@ -2974,7 +2978,7 @@ fn render_sync_check(config: &Config, git: GitHealth, fetched: bool) -> Result<u
         );
     } else {
         println!("{}", theme::banner("sync status"));
-        print_git_health(&git);
+        print_git_health(&git, &config.root);
         println!(
             "\n{}",
             if links_healthy {
