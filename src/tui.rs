@@ -296,8 +296,8 @@ impl App {
         };
         if group.canonical.is_none() {
             self.notice = format!(
-                "{} is not canonical yet. Adopt it with `si adopt {}`.",
-                group.name, group.name
+                "{} is not collected yet. Collect it with `si setup`.",
+                group.name
             );
             self.mode = Mode::Notice;
             return Ok(());
@@ -611,7 +611,7 @@ impl App {
             if group.canonical.is_some() {
                 "d  toggle enable / disable"
             } else {
-                "Adopt with: si adopt <skill>"
+                "Collect with: si setup"
             },
             self.style(ACCENT),
         ));
@@ -1136,10 +1136,10 @@ mod tests {
     }
 
     #[test]
-    fn unadopted_skill_toggle_shows_safe_guidance() {
+    fn uncollected_skill_toggle_shows_safe_guidance() {
         let (temp, mut config) = fixture();
         fs::remove_dir_all(config.root.join("rust-cli")).unwrap();
-        let physical = temp.path().join("agent/unadopted");
+        let physical = temp.path().join("agent/uncollected");
         fs::create_dir_all(&physical).unwrap();
         fs::write(physical.join("SKILL.md"), "body").unwrap();
         config.targets.get_mut("claude").unwrap().path = temp.path().join("agent");
@@ -1147,7 +1147,7 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE))
             .unwrap();
         assert!(matches!(app.mode, Mode::Notice));
-        assert!(app.notice.contains("si adopt"));
+        assert!(app.notice.contains("si setup"));
     }
 
     #[cfg(unix)]
