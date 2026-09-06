@@ -1,12 +1,28 @@
-use clap::{ArgAction, Args, CommandFactory, Parser, Subcommand};
+use clap::builder::styling::{Ansi256Color, Color, Style, Styles};
+use clap::{ArgAction, Args, ColorChoice, CommandFactory, FromArgMatches, Parser, Subcommand};
 use clap_complete::Shell;
 use std::path::PathBuf;
+
+const fn ansi(value: u8) -> Option<Color> {
+    Some(Color::Ansi256(Ansi256Color(value)))
+}
+
+/// Match `--help` to the palette the commands themselves print in.
+const HELP_STYLES: Styles = Styles::styled()
+    .header(Style::new().bold().fg_color(ansi(141)))
+    .usage(Style::new().bold().fg_color(ansi(141)))
+    .literal(Style::new().bold().fg_color(ansi(117)))
+    .placeholder(Style::new().fg_color(ansi(245)))
+    .valid(Style::new().fg_color(ansi(114)))
+    .invalid(Style::new().bold().fg_color(ansi(221)))
+    .error(Style::new().bold().fg_color(ansi(210)));
 
 #[derive(Parser, Debug)]
 #[command(
     name = "si",
     version,
-    about = "Deduplicate agent skills with safe canonical symlinks"
+    about = "Deduplicate agent skills with safe canonical symlinks",
+    styles = HELP_STYLES
 )]
 pub struct Cli {
     /// Print the exact operation plan without changing files.
@@ -30,6 +46,12 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
+    /// Open the interactive skill dashboard.
+    Tui {
+        /// Include project-local .claude and .agents skills.
+        #[arg(long, value_name = "PATH", num_args = 0..=1, default_missing_value = ".")]
+        project: Option<PathBuf>,
+    },
     /// Configure the canonical skill directory.
     Init { root: Option<PathBuf> },
     /// Scan configured skill locations without changing them.
@@ -61,6 +83,10 @@ pub enum Command {
     Link(LinkArgs),
     /// Remove managed links without removing canonical skills.
     Unlink(UnlinkArgs),
+    /// Hide a canonical skill from every configured agent.
+    Disable { skill: String },
+    /// Expose a canonical skill to every configured agent.
+    Enable { skill: String },
     /// List or edit target directories.
     Targets {
         #[command(subcommand)]
@@ -73,6 +99,12 @@ pub enum Command {
     },
     /// Link every canonical skill into every configured target.
     Restore,
+    /// Pull the canonical Git repository and repair agent links.
+    Sync {
+        /// Fetch and report Git/link drift without changing skills or links.
+        #[arg(long)]
+        check: bool,
+    },
     /// Generate shell completion definitions.
     Completions { shell: Shell },
 }
@@ -121,4 +153,22 @@ pub enum ConfigCommand {
 
 pub fn command() -> clap::Command {
     Cli::command()
+}
+
+/// Parse arguments so `--no-color` also silences clap's own help and errors.
+pub fn parse() -> Cli {
+    let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    let mut command = Cli::command();
+    if colour_is_unwanted(&args) {
+        command = command.color(ColorChoice::Never);
+    }
+    let matches = command.get_matches_from(args);
+    match Cli::from_arg_matches(&matches) {
+        Ok(cli) => cli,
+        Err(error) => error.exit(),
+    }
+}
+
+fn colour_is_unwanted(args: &[std::ffi::OsString]) -> bool {
+    std::env::var_os("NO_COLOR").is_some() || args.iter().any(|arg| arg == "--no-color")
 }

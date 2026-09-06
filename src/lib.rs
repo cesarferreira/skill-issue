@@ -1,7 +1,6 @@
 use anyhow::{Context, Result, anyhow, bail};
 use blake3::Hasher;
 use clap_complete::generate;
-use console::{Style, style};
 use dialoguer::{Confirm, Input, Select, theme::ColorfulTheme};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use serde::Serialize;
@@ -16,6 +15,8 @@ use walkdir::{DirEntry, WalkDir};
 
 mod cli;
 mod model;
+mod theme;
+mod tui;
 
 pub use cli::Cli;
 use cli::{Command, ConfigCommand, LinkArgs, TargetCommand, UnlinkArgs};
@@ -76,6 +77,16 @@ struct Replacement {
     backup: Option<PathBuf>,
 }
 
+/// Parse command line arguments, honouring `--no-color` for help and errors.
+pub fn parse_cli() -> Cli {
+    cli::parse()
+}
+
+/// Coloured `Error:` prefix used by the binary's top-level handler.
+pub fn error_prefix() -> String {
+    theme::error_prefix()
+}
+
 pub fn run(cli: Cli) -> Result<u8> {
     set_color(cli.no_color);
     VERBOSITY.store(cli.verbose, Ordering::Relaxed);
@@ -92,19 +103,24 @@ pub fn run(cli: Cli) -> Result<u8> {
             let config = match Config::load() {
                 Ok(config) => config,
                 Err(error) if is_missing_config(&error) => {
-                    eprintln!("skillissue is not configured. Run `si init`. ");
+                    eprintln!(
+                        "{} skill-issue is not configured. Run {}.",
+                        theme::warn_err(),
+                        theme::hint_err("si init")
+                    );
                     return Ok(EXIT_CONFIG);
                 }
                 Err(error) => {
-                    eprintln!("Invalid configuration: {error:#}");
+                    eprintln!("{} Invalid configuration: {error:#}", theme::bad_err());
                     return Ok(EXIT_CONFIG);
                 }
             };
             if let Err(error) = validate_config(&config) {
-                eprintln!("Invalid configuration: {error:#}");
+                eprintln!("{} Invalid configuration: {error:#}", theme::bad_err());
                 return Ok(EXIT_CONFIG);
             }
             match command {
+                Command::Tui { project } => tui::run(config, project, cli.dry_run, cli.no_color),
                 Command::Scan { project } => scan_command(&config, project.as_deref()),
                 Command::Adopt { skill } => {
                     adopt_command(&config, skill.as_deref(), cli.dry_run, true)
@@ -114,9 +130,16 @@ pub fn run(cli: Cli) -> Result<u8> {
                 Command::Diff { skill, content } => diff_command(&config, &skill, content),
                 Command::Link(args) => link_command(&config, args, cli.dry_run),
                 Command::Unlink(args) => unlink_command(&config, args, cli.dry_run),
+                Command::Disable { skill } => {
+                    toggle_skill_command(&config, &skill, false, cli.dry_run)
+                }
+                Command::Enable { skill } => {
+                    toggle_skill_command(&config, &skill, true, cli.dry_run)
+                }
                 Command::Targets { command } => targets_command(config, command, cli.dry_run),
                 Command::Config { command } => config_command(config, command, cli.dry_run),
                 Command::Restore => restore_command(&config, cli.dry_run),
+                Command::Sync { check } => sync_command(&config, check, cli.dry_run),
                 Command::Init { .. } => unreachable!(),
                 Command::Completions { .. } => unreachable!(),
             }
@@ -134,12 +157,22 @@ fn set_color(no_color: bool) {
 
 impl Config {
     fn path() -> Result<PathBuf> {
+        if let Some(path) = std::env::var_os("SKILL_ISSUE_CONFIG") {
+            return Ok(PathBuf::from(path));
+        }
+        // Keep accepting the original variable so existing installations do not break.
         if let Some(path) = std::env::var_os("SKILLISSUE_CONFIG") {
             return Ok(PathBuf::from(path));
         }
         let dir = dirs::config_dir()
             .ok_or_else(|| anyhow!("could not determine the configuration directory"))?;
-        Ok(dir.join("skillissue/config.toml"))
+        let current = dir.join("skill-issue/config.toml");
+        let legacy = dir.join("skillissue/config.toml");
+        Ok(if current.exists() || !legacy.exists() {
+            current
+        } else {
+            legacy
+        })
     }
 
     fn load() -> Result<Self> {
@@ -284,7 +317,7 @@ fn init(root: Option<PathBuf>, dry_run: bool) -> Result<u8> {
     if config_path.exists() {
         let current = Config::load()?;
         if current.root == config.root {
-            println!("skillissue is already configured with {}", root.display());
+            println!("skill-issue is already configured with {}", root.display());
             return Ok(EXIT_OK);
         }
         bail!(
@@ -292,11 +325,19 @@ fn init(root: Option<PathBuf>, dry_run: bool) -> Result<u8> {
             config_path.display()
         );
     }
-    println!("{}", Style::new().bold().apply_to("INIT PLAN"));
-    println!("CREATE  {}", root.display());
-    println!("WRITE   {}", config_path.display());
+    println!("{}", theme::heading("INIT PLAN"));
+    println!(
+        "{}  {}",
+        theme::action("CREATE"),
+        theme::path_text(&root.display().to_string())
+    );
+    println!(
+        "{}   {}",
+        theme::action("WRITE"),
+        theme::path_text(&config_path.display().to_string())
+    );
     if dry_run {
-        println!("Dry run; no files changed.");
+        println!("{}", theme::dim("Dry run; no files changed."));
         return Ok(EXIT_OK);
     }
     fs::create_dir_all(&root)
@@ -304,17 +345,17 @@ fn init(root: Option<PathBuf>, dry_run: bool) -> Result<u8> {
     config.save()?;
     println!(
         "{} Canonical directory {}",
-        style("✓").green(),
-        display_path(&root)
+        theme::ok(),
+        theme::path_text(&display_path(&root))
     );
-    println!("Detected:");
+    println!("{}", theme::heading("DETECTED"));
     let mut detected: Vec<_> = config.targets.keys().collect();
     detected.sort_by_key(|id| target_rank(id));
     for id in detected {
-        println!("  {} {}", style("✓").green(), target_label(id));
+        println!("  {} {}", theme::ok(), theme::agent(&target_label(id)));
     }
     if VERBOSITY.load(Ordering::Relaxed) > 0 {
-        println!("{} Configuration saved", style("✓").green());
+        println!("{} Configuration saved", theme::ok());
     }
     Ok(EXIT_OK)
 }
@@ -417,7 +458,10 @@ fn empty_group(name: &str) -> SkillGroup {
 }
 
 fn ignored_top_level(name: &str) -> bool {
-    name == ".git" || name == ".DS_Store" || name.starts_with(".skillissue-")
+    name == ".git"
+        || name == ".DS_Store"
+        || name.starts_with(".skill-issue-")
+        || name.starts_with(".skillissue-")
 }
 
 fn inspect_installation(
@@ -640,19 +684,23 @@ fn scan_command(config: &Config, project: Option<&Path>) -> Result<u8> {
         );
         return Ok(result_exit(&result));
     }
-    println!("Scanning known skill directories...");
+    println!("{}", theme::banner("Scanning known skill directories..."));
+    println!();
     let mut target_counts: Vec<_> = result.target_counts.iter().collect();
     target_counts.sort_by_key(|(id, _)| target_rank(id));
     for (target, count) in target_counts {
         println!(
-            "  {:<10} {:<38} {:>3}",
-            target_label(target),
-            display_path(&effective.targets[target].path),
-            count
+            "  {} {} {}",
+            theme::agent_padded(&target_label(target), 10),
+            theme::path_text(&format!(
+                "{:<38}",
+                display_path(&effective.targets[target].path)
+            )),
+            theme::count(format!("{count:>3}"))
         );
     }
     for target in &result.missing_targets {
-        println!("  {target:<12} {} missing", style("⚠").yellow());
+        println!("  {:<12} {} missing", theme::agent(target), theme::warn());
     }
     let installations: usize = result.target_counts.values().sum();
     let count = |status| {
@@ -662,19 +710,29 @@ fn scan_command(config: &Config, project: Option<&Path>) -> Result<u8> {
             .filter(|group| group.status() == status)
             .count()
     };
-    println!("Found {installations} installations");
-    println!("Found {} unique skills", result.groups.len());
+    println!();
+    println!("Found {} installations", theme::count(installations));
+    println!("Found {} unique skills", theme::count(result.groups.len()));
     println!(
         "{} {} identical duplicates",
-        style("✓").green(),
-        count(SkillStatus::IdenticalDuplicate)
+        theme::ok(),
+        theme::good_count(count(SkillStatus::IdenticalDuplicate))
     );
+    let divergent = count(SkillStatus::Divergent);
     println!(
         "{} {} divergent",
-        style("⚠").yellow(),
-        count(SkillStatus::Divergent)
+        if divergent == 0 {
+            theme::ok()
+        } else {
+            theme::warn()
+        },
+        theme::warn_count(divergent)
     );
-    println!("• {} unique", count(SkillStatus::Unique));
+    println!(
+        "{} {} unique",
+        theme::dot(),
+        theme::count(count(SkillStatus::Unique))
+    );
     if VERBOSITY.load(Ordering::Relaxed) > 0 {
         print_groups(&result);
     }
@@ -732,7 +790,7 @@ fn print_groups(result: &ScanResult) {
             SkillStatus::Managed => "MANAGED",
             SkillStatus::Broken => "BROKEN",
         };
-        println!("\n{}", Style::new().bold().apply_to(heading));
+        println!("\n{}", theme::heading(heading));
         for group in matching {
             let targets = group
                 .installations
@@ -740,36 +798,37 @@ fn print_groups(result: &ScanResult) {
                 .map(|i| i.target.as_str())
                 .collect::<Vec<_>>()
                 .join(" ");
-            println!("{:<20} {}", group.name, targets);
-            if status == SkillStatus::Divergent {
+            println!(
+                "{} {}",
+                theme::skill(&format!("{:<20}", group.name)),
+                theme::agent(&targets)
+            );
+            let detailed =
+                status == SkillStatus::Divergent || VERBOSITY.load(Ordering::Relaxed) > 1;
+            if detailed {
                 if let Some(c) = &group.canonical {
-                    println!("  canonical    {}", short_hash(&c.fingerprint));
-                }
-                for installation in &group.installations {
                     println!(
-                        "  {:<12} {}",
-                        installation.target,
-                        installation
-                            .fingerprint
-                            .as_deref()
-                            .map(short_hash)
-                            .unwrap_or("broken")
+                        "  {} {}",
+                        theme::dim("canonical   "),
+                        theme::fingerprint(short_hash(&c.fingerprint))
                     );
                 }
-            }
-            if VERBOSITY.load(Ordering::Relaxed) > 1 && status != SkillStatus::Divergent {
-                if let Some(c) = &group.canonical {
-                    println!("  canonical    {}", short_hash(&c.fingerprint));
-                }
+                let fallback = if status == SkillStatus::Divergent {
+                    "broken"
+                } else {
+                    "unreadable"
+                };
                 for installation in &group.installations {
                     println!(
-                        "  {:<12} {}",
-                        installation.target,
-                        installation
-                            .fingerprint
-                            .as_deref()
-                            .map(short_hash)
-                            .unwrap_or("unreadable")
+                        "  {} {}",
+                        theme::agent_padded(&installation.target, 12),
+                        theme::fingerprint(
+                            installation
+                                .fingerprint
+                                .as_deref()
+                                .map(short_hash)
+                                .unwrap_or(fallback)
+                        )
                     );
                 }
             }
@@ -918,39 +977,53 @@ fn status_command(config: &Config, include_git: bool) -> Result<u8> {
         );
         return Ok(code);
     }
-    println!("{}", Style::new().bold().apply_to("skillissue"));
-    println!("{}", Style::new().bold().apply_to("Canonical"));
-    println!("  {}", display_path(&config.root));
-    println!("{canonical} skills");
-    println!("{} agents", coverage.len());
+    println!("{}", theme::banner("one true copy of every agent skill"));
+    println!();
+    println!("{}", theme::heading("CANONICAL"));
+    println!("  {}", theme::path_text(&display_path(&config.root)));
+    println!("  {} skills", theme::count(canonical));
+    println!("  {} agents", theme::count(coverage.len()));
+    println!();
+    println!("{}", theme::heading("COVERAGE"));
     let mut ordered_coverage: Vec<_> = coverage.iter().collect();
     ordered_coverage.sort_by_key(|(id, _)| target_rank(id));
     for (id, count) in ordered_coverage {
-        let mark = if *count == canonical {
-            style("✓").green()
-        } else {
-            style("⚠").yellow()
-        };
-        println!("{mark} {:<10} {count}/{canonical}", target_label(id));
+        let complete = *count == canonical;
+        println!(
+            "{} {} {} {}",
+            if complete { theme::ok() } else { theme::warn() },
+            theme::agent_padded(&target_label(id), 10),
+            if complete {
+                theme::good_count(format!("{count}/{canonical}"))
+            } else {
+                theme::warn_count(format!("{count}/{canonical}"))
+            },
+            theme::gauge(*count, canonical, 12)
+        );
     }
     if VERBOSITY.load(Ordering::Relaxed) > 0 {
-        println!("{installations} installations\n{managed} healthy symlinks");
+        println!(
+            "  {} installations\n  {} healthy symlinks",
+            theme::count(installations),
+            theme::good_count(managed)
+        );
     }
     if code == EXIT_OK {
-        println!("{} No skill issues.", style("✓").green());
+        println!("\n{} No skill issues.", theme::ok());
     } else {
-        println!("\n{}", Style::new().bold().apply_to("Issues"));
+        println!("\n{}", theme::heading("ISSUES"));
         for target in &result.missing_targets {
             println!(
-                "{} {target} target directory is missing",
-                style("⚠").yellow()
+                "{} {} target directory is missing",
+                theme::warn(),
+                theme::agent(target)
             );
         }
         for path in &recovery {
             println!(
                 "{} interrupted-migration recovery artifact: {}",
-                style("⚠").yellow(),
-                path.display()
+                theme::warn(),
+                theme::path(path)
             );
         }
         for group in result
@@ -959,32 +1032,32 @@ fn status_command(config: &Config, include_git: bool) -> Result<u8> {
             .filter(|g| g.status() != SkillStatus::Managed)
         {
             println!(
-                "{} {} ({:?})",
+                "{} {} ({})",
                 issue_mark(group.status()),
-                group.name,
-                group.status()
+                theme::skill(&group.name),
+                status_label(group.status())
             );
             for installation in &group.installations {
                 println!(
-                    "  {}: {} ({:?})",
-                    installation.target,
-                    installation.path.display(),
-                    installation.kind
+                    "  {}: {} ({})",
+                    theme::agent(&installation.target),
+                    theme::path(&installation.path),
+                    theme::dim(kind_label(&installation.kind))
                 );
             }
         }
         for (id, count) in coverage.iter().filter(|(_, count)| **count < canonical) {
             println!(
                 "{} {} is missing {} canonical skill links",
-                style("⚠").yellow(),
-                target_label(id),
-                canonical - count
+                theme::warn(),
+                theme::agent(&target_label(id)),
+                theme::warn_count(canonical - count)
             );
         }
         if coverage.values().any(|count| *count < canonical) {
-            println!("Run: si link --all");
+            println!("Run: {}", theme::hint("si link --all"));
         } else {
-            println!("Run: si doctor");
+            println!("Run: {}", theme::hint("si doctor"));
         }
     }
     if let Some(git) = git {
@@ -999,84 +1072,142 @@ struct GitHealth {
     dirty: bool,
     upstream: Option<String>,
     ahead: Option<u64>,
+    behind: Option<u64>,
 }
 
 fn git_health(root: &Path) -> Result<GitHealth> {
-    if !root.join(".git").exists() {
+    let repository = git_output(root, &["rev-parse", "--show-toplevel"])?;
+    let repository_root = repository.status.success().then(|| {
+        PathBuf::from(
+            String::from_utf8_lossy(&repository.stdout)
+                .trim()
+                .to_string(),
+        )
+    });
+    let root_is_repository = repository_root
+        .as_deref()
+        .and_then(|path| fs::canonicalize(path).ok())
+        .zip(fs::canonicalize(root).ok())
+        .is_some_and(|(repository, configured)| repository == configured);
+    if !root_is_repository {
         return Ok(GitHealth {
             repository: false,
             dirty: false,
             upstream: None,
             ahead: None,
+            behind: None,
         });
     }
-    let run = |args: &[&str]| -> Result<std::process::Output> {
-        std::process::Command::new("git")
-            .args(args)
-            .current_dir(root)
-            .output()
-            .with_context(|| "run git")
-    };
-    let status = run(&["status", "--porcelain"])?;
+    let status = git_output(root, &["status", "--porcelain"])?;
     if !status.status.success() {
         bail!("could not inspect Git status in {}", root.display());
     }
-    let upstream_output = run(&["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])?;
+    let upstream_output = git_output(
+        root,
+        &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+    )?;
     let upstream = upstream_output.status.success().then(|| {
         String::from_utf8_lossy(&upstream_output.stdout)
             .trim()
             .to_string()
     });
-    let ahead = if upstream.is_some() {
-        let output = run(&["rev-list", "--count", "@{u}..HEAD"])?;
-        output
-            .status
-            .success()
-            .then(|| String::from_utf8_lossy(&output.stdout).trim().parse())
-            .transpose()?
+    let (ahead, behind) = if upstream.is_some() {
+        let output = git_output(
+            root,
+            &["rev-list", "--left-right", "--count", "HEAD...@{u}"],
+        )?;
+        if output.status.success() {
+            let counts = String::from_utf8_lossy(&output.stdout);
+            let mut counts = counts.split_whitespace();
+            (
+                counts.next().map(str::parse).transpose()?,
+                counts.next().map(str::parse).transpose()?,
+            )
+        } else {
+            (None, None)
+        }
     } else {
-        None
+        (None, None)
     };
     Ok(GitHealth {
         repository: true,
         dirty: !status.stdout.is_empty(),
         upstream,
         ahead,
+        behind,
     })
 }
 
+fn git_output(root: &Path, args: &[&str]) -> Result<std::process::Output> {
+    std::process::Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .output()
+        .with_context(|| format!("run `git {}` in {}", args.join(" "), root.display()))
+}
+
 fn print_git_health(git: &GitHealth) {
-    println!("\n{}", Style::new().bold().apply_to("Git"));
+    println!("\n{}", theme::heading("GIT"));
     if !git.repository {
-        println!(
-            "{} Canonical root is not a Git repository",
-            style("⚠").yellow()
-        );
+        println!("{} Canonical root is not a Git repository", theme::warn());
         return;
     }
-    println!("{} repository", style("✓").green());
+    println!("{} repository", theme::ok());
     println!(
         "{} working tree",
         if git.dirty {
-            style("⚠ dirty").yellow()
+            format!("{} {}", theme::warn(), theme::warn_count("dirty"))
         } else {
-            style("✓ clean").green()
+            format!("{} {}", theme::ok(), theme::good_count("clean"))
         }
     );
-    match (&git.upstream, git.ahead) {
-        (Some(upstream), Some(ahead)) => println!(
-            "{} upstream {upstream}; {ahead} commits ahead",
-            style("✓").green()
-        ),
-        _ => println!("{} no upstream configured", style("⚠").yellow()),
+    match (&git.upstream, git.ahead, git.behind) {
+        (Some(upstream), Some(ahead), Some(behind)) => {
+            let current = ahead == 0 && behind == 0;
+            println!(
+                "{} upstream {}; {} ahead, {} behind",
+                if current { theme::ok() } else { theme::warn() },
+                theme::agent(upstream),
+                if ahead == 0 {
+                    theme::good_count(ahead)
+                } else {
+                    theme::warn_count(ahead)
+                },
+                if behind == 0 {
+                    theme::good_count(behind)
+                } else {
+                    theme::warn_count(behind)
+                }
+            );
+        }
+        _ => println!("{} no upstream configured", theme::warn()),
     }
 }
 
 fn issue_mark(status: SkillStatus) -> console::StyledObject<&'static str> {
     if status == SkillStatus::Divergent {
-        style("✗").red()
+        theme::bad()
     } else {
-        style("⚠").yellow()
+        theme::warn()
+    }
+}
+
+fn status_label(status: SkillStatus) -> &'static str {
+    match status {
+        SkillStatus::Unique => "unadopted",
+        SkillStatus::IdenticalDuplicate => "duplicate",
+        SkillStatus::Divergent => "conflict",
+        SkillStatus::Managed => "managed",
+        SkillStatus::Broken => "broken",
+    }
+}
+
+fn kind_label(kind: &InstallationKind) -> &'static str {
+    match kind {
+        InstallationKind::Physical => "physical copy",
+        InstallationKind::ManagedSymlink => "managed link",
+        InstallationKind::ForeignSymlink => "foreign link",
+        InstallationKind::BrokenSymlink => "broken link",
     }
 }
 
@@ -1084,11 +1215,15 @@ fn default_command(dry_run: bool) -> Result<u8> {
     let config = match Config::load() {
         Ok(config) => config,
         Err(error) if is_missing_config(&error) => {
-            eprintln!("skillissue is not configured. Run `si init`. ");
+            eprintln!(
+                "{} skill-issue is not configured. Run {}.",
+                theme::warn_err(),
+                theme::hint_err("si init")
+            );
             return Ok(EXIT_CONFIG);
         }
         Err(error) => {
-            eprintln!("Invalid configuration: {error:#}");
+            eprintln!("{} Invalid configuration: {error:#}", theme::bad_err());
             return Ok(EXIT_CONFIG);
         }
     };
@@ -1103,7 +1238,10 @@ fn default_command(dry_run: bool) -> Result<u8> {
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         return status_command(&config, false);
     }
-    println!("Found skill issues. Preparing a safe migration plan...\n");
+    println!(
+        "{}\n",
+        theme::banner("Found skill issues. Preparing a safe migration plan...")
+    );
     adopt_from_scan(&config, &result, None, dry_run, true)
 }
 
@@ -1146,8 +1284,9 @@ fn adopt_from_scan(
         bail!("adoption requires an interactive confirmation; use --dry-run to inspect the plan");
     }
     println!(
-        "Canonical skill directory:\n  {}\n",
-        display_path(&config.root)
+        "{}\n  {}\n",
+        theme::heading("CANONICAL SKILL DIRECTORY"),
+        theme::path_text(&display_path(&config.root))
     );
     let mut stats = MigrationStats {
         skills: selected.len(),
@@ -1169,13 +1308,13 @@ fn adopt_from_scan(
                 .interact()?
         {
             stats.skipped += 1;
-            println!("{} skipped\n", style("⚠").yellow());
+            println!("{} skipped\n", theme::warn());
             continue;
         }
         let mut plans = plans_for_group(config, group, tty)?;
         if plans.is_empty() {
             stats.skipped += 1;
-            println!("{} skipped\n", style("⚠").yellow());
+            println!("{} skipped\n", theme::warn());
             continue;
         }
         if plans.len() == 1 {
@@ -1205,7 +1344,7 @@ fn adopt_from_scan(
                 .interact()?
         {
             stats.skipped += 1;
-            println!("{} skipped\n", style("⚠").yellow());
+            println!("{} skipped\n", theme::warn());
             continue;
         }
         for plan in &plans {
@@ -1214,46 +1353,64 @@ fn adopt_from_scan(
             stats.preserved += plan.preserved.len();
         }
         stats.adopted += 1;
-        println!("{} {} adopted\n", style("✓").green(), group.name);
+        println!("{} {} adopted\n", theme::ok(), theme::skill(&group.name));
     }
     if !planned_any {
         if stats.skipped > 0 {
-            println!("Done.\n{} skills", stats.skills);
-            println!("{} installations", stats.installations);
-            println!("{} 0 adopted", style("✓").green());
-            println!("{} {} skipped", style("⚠").yellow(), stats.skipped);
-            println!("{} 0 symlinks created", style("✓").green());
-            println!("{} no data lost", style("✓").green());
-            println!("Run:\n  si status");
+            println!("{}", theme::heading("DONE"));
+            println!("{} skills", theme::count(stats.skills));
+            println!("{} installations", theme::count(stats.installations));
+            println!("{} {} adopted", theme::ok(), theme::good_count(0));
+            println!(
+                "{} {} skipped",
+                theme::warn(),
+                theme::warn_count(stats.skipped)
+            );
+            println!("{} {} symlinks created", theme::ok(), theme::good_count(0));
+            println!("{} no data lost", theme::ok());
+            println!("Run:\n  {}", theme::hint("si status"));
             return Ok(result_exit(result));
         }
-        println!("No adoptable skills found.");
+        println!("{}", theme::dim("No adoptable skills found."));
         return Ok(result_exit(result));
     }
     if dry_run {
-        println!("Dry run; no files changed.");
+        println!("{}", theme::dim("Dry run; no files changed."));
         return Ok(result_exit(result));
     }
     let after = scan(config)?;
-    println!("Done.\n{} skills", stats.skills);
-    println!("{} installations", stats.installations);
-    println!("{} {} adopted", style("✓").green(), stats.adopted);
+    println!("{}", theme::heading("DONE"));
+    println!("{} skills", theme::count(stats.skills));
+    println!("{} installations", theme::count(stats.installations));
+    println!(
+        "{} {} adopted",
+        theme::ok(),
+        theme::good_count(stats.adopted)
+    );
     if stats.skipped > 0 {
-        println!("{} {} skipped", style("⚠").yellow(), stats.skipped);
+        println!(
+            "{} {} skipped",
+            theme::warn(),
+            theme::warn_count(stats.skipped)
+        );
     }
-    println!("{} {} symlinks created", style("✓").green(), stats.links);
+    println!(
+        "{} {} symlinks created",
+        theme::ok(),
+        theme::good_count(stats.links)
+    );
     if stats.preserved > 0 {
         println!(
             "{} {} divergent versions preserved",
-            style("✓").green(),
-            stats.preserved
+            theme::ok(),
+            theme::good_count(stats.preserved)
         );
     }
-    println!("{} no data lost", style("✓").green());
+    println!("{} no data lost", theme::ok());
     if result_exit(&after) == EXIT_OK {
-        println!("{} No skill issues.", style("✓").green());
+        println!("{} No skill issues.", theme::ok());
     } else {
-        println!("Run:\n  si status");
+        println!("Run:\n  {}", theme::hint("si status"));
     }
     Ok(result_exit(&after))
 }
@@ -1285,32 +1442,34 @@ fn add_missing_target_links(
 }
 
 fn print_adoption_group(group: &SkillGroup) {
-    println!("{}", Style::new().bold().apply_to(&group.name));
+    println!("{}", theme::skill(&group.name));
     if let Some(canonical) = &group.canonical {
         println!(
-            "  {:<10} {}",
-            "Canonical",
-            short_hash(&canonical.fingerprint)
+            "  {} {}",
+            theme::agent_padded("Canonical", 10),
+            theme::fingerprint(short_hash(&canonical.fingerprint))
         );
     }
     for installation in &group.installations {
         println!(
-            "  {:<10} {}  {}",
-            target_label(&installation.target),
-            installation
-                .fingerprint
-                .as_deref()
-                .map(short_hash)
-                .unwrap_or("broken"),
-            display_path(&installation.path)
+            "  {} {}  {}",
+            theme::agent_padded(&target_label(&installation.target), 10),
+            theme::fingerprint(
+                installation
+                    .fingerprint
+                    .as_deref()
+                    .map(short_hash)
+                    .unwrap_or("broken")
+            ),
+            theme::path_text(&display_path(&installation.path))
         );
     }
     match group.status() {
         SkillStatus::IdenticalDuplicate => {
-            println!("{} all copies identical", style("✓").green())
+            println!("{} all copies identical", theme::ok())
         }
-        SkillStatus::Unique => println!("• one physical copy"),
-        SkillStatus::Divergent => println!("{} copies differ", style("⚠").yellow()),
+        SkillStatus::Unique => println!("{} one physical copy", theme::dot()),
+        SkillStatus::Divergent => println!("{} copies differ", theme::warn()),
         _ => {}
     }
 }
@@ -1524,11 +1683,12 @@ fn plan_selected_version_at(
 }
 
 fn migration_archive_root() -> Result<PathBuf> {
-    let base = std::env::var_os("SKILLISSUE_CACHE")
+    let base = std::env::var_os("SKILL_ISSUE_CACHE")
+        .or_else(|| std::env::var_os("SKILLISSUE_CACHE"))
         .map(PathBuf::from)
         .or_else(|| dirs::home_dir().map(|home| home.join(".cache")))
         .ok_or_else(|| anyhow!("could not determine cache directory for migration archive"))?;
-    Ok(base.join("skillissue/migrations").join(
+    Ok(base.join("skill-issue/migrations").join(
         chrono::Utc::now()
             .format("%Y-%m-%dT%H%M%S%.3fZ")
             .to_string(),
@@ -1698,98 +1858,101 @@ fn validate_skill_name(name: &str) -> Result<()> {
 }
 
 fn render_adoption_summary(plans: &[AdoptionPlan]) {
+    let transfer = |label: &str, source: &Path, destination: &Path| {
+        println!(
+            "{}\n  {}\n    {} {}",
+            theme::heading(label),
+            theme::path_text(&display_path(source)),
+            theme::arrow(),
+            theme::path_text(&display_path(destination))
+        );
+    };
     for plan in plans {
         if !plan.preserved.is_empty() {
-            println!("Preserving:");
+            println!("{}", theme::heading("PRESERVING"));
             for preserved in &plan.preserved {
                 println!(
-                    "  {}\n    -> {}",
-                    display_path(&preserved.source),
-                    display_path(&preserved.destination)
+                    "  {}\n    {} {}",
+                    theme::path_text(&display_path(&preserved.source)),
+                    theme::arrow(),
+                    theme::path_text(&display_path(&preserved.destination))
                 );
             }
         }
         match &plan.transfer {
             CanonicalTransfer::Existing => {}
-            CanonicalTransfer::Move { source } => println!(
-                "Moving:\n  {}\n    -> {}",
-                display_path(source),
-                display_path(&plan.canonical)
-            ),
-            CanonicalTransfer::Copy { source, .. } => println!(
-                "Copying:\n  {}\n    -> {}",
-                display_path(source),
-                display_path(&plan.canonical)
-            ),
+            CanonicalTransfer::Move { source } => transfer("MOVING", source, &plan.canonical),
+            CanonicalTransfer::Copy { source, .. } => transfer("COPYING", source, &plan.canonical),
         }
-        println!("Linking:");
+        println!("{}", theme::heading("LINKING"));
         for replacement in &plan.replacements {
             println!(
-                "  {} -> {}",
-                display_path(&replacement.original),
-                display_path(&plan.canonical)
+                "  {} {} {}",
+                theme::path_text(&display_path(&replacement.original)),
+                theme::arrow(),
+                theme::path_text(&display_path(&plan.canonical))
             );
         }
     }
 }
 
 fn render_adoption_plans(plans: &[AdoptionPlan]) {
-    println!("{}", Style::new().bold().apply_to("PLAN"));
+    println!("{}", theme::heading("PLAN"));
+    let step = |verb: &str, from: &Path, to: &Path| {
+        println!(
+            "{}\n  {}\n    {} {}",
+            theme::action(verb),
+            theme::path(from),
+            theme::arrow(),
+            theme::path(to)
+        );
+    };
     for plan in plans {
         for preserved in &plan.preserved {
             println!(
-                "PRESERVE\n  {}\n    -> {}",
-                display_path(&preserved.source),
-                display_path(&preserved.destination)
+                "{}\n  {}\n    {} {}",
+                theme::action("PRESERVE"),
+                theme::path_text(&display_path(&preserved.source)),
+                theme::arrow(),
+                theme::path_text(&display_path(&preserved.destination))
             );
         }
         match &plan.transfer {
             CanonicalTransfer::Existing => {}
-            CanonicalTransfer::Move { source } => {
-                println!(
-                    "MOVE\n  {}\n    -> {}",
-                    source.display(),
-                    plan.canonical.display()
-                );
-            }
+            CanonicalTransfer::Move { source } => step("MOVE", source, &plan.canonical),
             CanonicalTransfer::Copy { source, temporary } => {
-                println!(
-                    "COPY\n  {}\n    -> {}",
-                    source.display(),
-                    temporary.display()
-                );
-                println!("VERIFY  {}", temporary.display());
-                println!(
-                    "MOVE\n  {}\n    -> {}",
-                    temporary.display(),
-                    plan.canonical.display()
-                );
+                step("COPY", source, temporary);
+                println!("{}  {}", theme::action("VERIFY"), theme::path(temporary));
+                step("MOVE", temporary, &plan.canonical);
             }
         }
-        println!("VERIFY  {}", plan.canonical.display());
+        println!(
+            "{}  {}",
+            theme::action("VERIFY"),
+            theme::path(&plan.canonical)
+        );
         for replacement in &plan.replacements {
             if let Some(backup) = &replacement.backup {
-                println!(
-                    "STAGE\n  {}\n    -> {}",
-                    replacement.original.display(),
-                    backup.display()
-                );
+                step("STAGE", &replacement.original, backup);
             }
-            println!(
-                "LINK\n  {}\n    -> {}",
-                replacement.original.display(),
-                managed_link_value(&plan.canonical, &replacement.original, plan.relative_links,)
-                    .display()
+            step(
+                "LINK",
+                &replacement.original,
+                &managed_link_value(&plan.canonical, &replacement.original, plan.relative_links),
             );
-            println!("VERIFY  {}", replacement.original.display());
+            println!(
+                "{}  {}",
+                theme::action("VERIFY"),
+                theme::path(&replacement.original)
+            );
             if let Some(backup) = &replacement.backup {
-                println!("REMOVE  {}", backup.display());
+                println!("{}  {}", theme::action("REMOVE"), theme::path(backup));
             }
         }
     }
     println!(
         "{} locations affected.",
-        plans.iter().map(|p| p.replacements.len()).sum::<usize>()
+        theme::count(plans.iter().map(|p| p.replacements.len()).sum::<usize>())
     );
 }
 
@@ -1917,9 +2080,9 @@ fn execute_adoption(plan: &AdoptionPlan) -> Result<()> {
     for preserved in &plan.preserved {
         println!(
             "{} preserved {} version at:\n  {}",
-            style("⚠").yellow(),
-            target_label(&preserved.target),
-            display_path(&preserved.destination)
+            theme::warn(),
+            theme::agent(&target_label(&preserved.target)),
+            theme::path_text(&display_path(&preserved.destination))
         );
     }
     Ok(())
@@ -1932,7 +2095,7 @@ fn unique_sibling(path: &Path, purpose: &str) -> PathBuf {
         .unwrap_or_else(|| OsStr::new("skill"))
         .to_string_lossy();
     path.with_file_name(format!(
-        ".skillissue-{purpose}-{name}-{}-{sequence}",
+        ".skill-issue-{purpose}-{name}-{}-{sequence}",
         std::process::id()
     ))
 }
@@ -2075,30 +2238,29 @@ fn doctor_command(config: &Config, fix: bool, dry_run: bool) -> Result<u8> {
         );
         return Ok(code);
     }
-    println!("Checking skillissue...");
+    println!("{}", theme::banner("Checking skill-issue..."));
+    println!();
     let root_ok = config.root.is_dir();
     println!(
         "{} Canonical directory {}",
+        if root_ok { theme::ok() } else { theme::bad() },
         if root_ok {
-            style("✓").green()
+            theme::good_count("exists")
         } else {
-            style("✗").red()
-        },
-        if root_ok { "exists" } else { "is missing" }
+            theme::bad_count("is missing")
+        }
     );
     let result = scan(config)?;
     for (target, target_config) in config.targets.iter().filter(|(_, t)| t.enabled) {
+        let healthy = target_config.path.is_dir();
         println!(
-            "{} {target} target {}",
-            if target_config.path.is_dir() {
-                style("✓").green()
+            "{} {} target {}",
+            if healthy { theme::ok() } else { theme::warn() },
+            theme::agent(target),
+            if healthy {
+                theme::good_count("healthy")
             } else {
-                style("⚠").yellow()
-            },
-            if target_config.path.is_dir() {
-                "healthy"
-            } else {
-                "missing"
+                theme::warn_count("missing")
             }
         );
     }
@@ -2107,8 +2269,8 @@ fn doctor_command(config: &Config, fix: bool, dry_run: bool) -> Result<u8> {
     for path in &recovery {
         println!(
             "{} Recovery artifact from an interrupted migration: {}",
-            style("⚠").yellow(),
-            path.display()
+            theme::warn(),
+            theme::path(path)
         );
     }
     for group in result.groups.values() {
@@ -2117,46 +2279,39 @@ fn doctor_command(config: &Config, fix: bool, dry_run: bool) -> Result<u8> {
                 InstallationKind::ManagedSymlink => {}
                 InstallationKind::Physical if group.canonical.is_none() => {
                     issue_count += 1;
-                    println!(
-                        "{}. {} is not adopted",
-                        issue_count,
-                        installation.path.display()
-                    );
+                    print_doctor_issue(issue_count, &installation.path, "is not adopted");
                 }
                 InstallationKind::Physical => {
                     issue_count += 1;
-                    println!(
-                        "{}. {} is a physical copy beside a canonical skill",
+                    print_doctor_issue(
                         issue_count,
-                        installation.path.display()
+                        &installation.path,
+                        "is a physical copy beside a canonical skill",
                     );
                 }
                 InstallationKind::ForeignSymlink => {
                     issue_count += 1;
-                    println!(
-                        "{}. {} is a foreign symlink",
-                        issue_count,
-                        installation.path.display()
-                    );
+                    print_doctor_issue(issue_count, &installation.path, "is a foreign symlink");
                 }
                 InstallationKind::BrokenSymlink => {
                     issue_count += 1;
-                    println!(
-                        "{}. {} is a broken symlink",
-                        issue_count,
-                        installation.path.display()
-                    );
+                    print_doctor_issue(issue_count, &installation.path, "is a broken symlink");
                 }
             }
         }
     }
     if issue_count == 0 {
-        println!("{} No skill issues.", style("✓").green());
+        println!("\n{} No skill issues.", theme::ok());
         return Ok(EXIT_OK);
     }
-    println!("{} {issue_count} issues found", style("⚠").yellow());
+    println!(
+        "\n{} {} issue{} found",
+        theme::warn(),
+        theme::warn_count(issue_count),
+        if issue_count == 1 { "" } else { "s" }
+    );
     if !fix {
-        println!("Run: si doctor --fix");
+        println!("Run: {}", theme::hint("si doctor --fix"));
         return Ok(result_exit(&result).max(EXIT_ISSUES));
     }
 
@@ -2201,17 +2356,19 @@ fn doctor_command(config: &Config, fix: bool, dry_run: bool) -> Result<u8> {
     if !adoptions.is_empty() {
         render_adoption_plans(&adoptions);
     } else {
-        println!("{}", Style::new().bold().apply_to("PLAN"));
+        println!("{}", theme::heading("PLAN"));
     }
     for (link, target, _) in &link_repairs {
         println!(
-            "RECREATE LINK\n  {}\n    -> {}",
-            link.display(),
-            target.display()
+            "{}\n  {}\n    {} {}",
+            theme::action("RECREATE LINK"),
+            theme::path(link),
+            theme::arrow(),
+            theme::path(target)
         );
     }
     if dry_run {
-        println!("Dry run; no files changed.");
+        println!("{}", theme::dim("Dry run; no files changed."));
         return Ok(result_exit(&result));
     }
     require_confirmation("Apply these unambiguous repairs?")?;
@@ -2232,9 +2389,18 @@ fn doctor_command(config: &Config, fix: bool, dry_run: bool) -> Result<u8> {
     }
     let after = scan(config)?;
     if result_exit(&after) == EXIT_OK {
-        println!("{} No skill issues.", style("✓").green());
+        println!("{} No skill issues.", theme::ok());
     }
     Ok(result_exit(&after))
+}
+
+fn print_doctor_issue(number: usize, path: &Path, problem: &str) {
+    println!(
+        "{}. {} {}",
+        theme::warn_count(number),
+        theme::path(path),
+        theme::dim(problem)
+    );
 }
 
 fn recovery_artifacts(config: &Config) -> Result<Vec<PathBuf>> {
@@ -2249,7 +2415,8 @@ fn recovery_artifacts(config: &Config) -> Result<Vec<PathBuf>> {
     for location in locations.filter(|path| path.is_dir()) {
         for entry in sorted_children(location)? {
             let name = entry.file_name();
-            if name.to_string_lossy().starts_with(".skillissue-") {
+            let name = name.to_string_lossy();
+            if name.starts_with(".skill-issue-") || name.starts_with(".skillissue-") {
                 artifacts.push(entry.path());
             }
         }
@@ -2437,15 +2604,25 @@ fn diff_group(group: &SkillGroup, content: bool, ignore: &[String]) -> Result<u8
             EXIT_CONFLICTS
         });
     }
-    println!("{} ↔ {}", target_label(&left.0), target_label(&right.0));
+    println!(
+        "{} {} {}",
+        theme::agent(&target_label(&left.0)),
+        theme::dim("↔"),
+        theme::agent(&target_label(&right.0))
+    );
     for change in &changes {
-        println!("{} {}", change.status, change.path);
+        let mark = match change.status {
+            'A' => theme::good_count(change.status),
+            'D' => theme::bad_count(change.status),
+            _ => theme::warn_count(change.status),
+        };
+        println!("{mark} {}", theme::skill(&change.path));
         if let Some(content) = &change.content {
-            print!("{content}");
+            print!("{}", theme::diff(content));
         }
     }
     if changes.is_empty() {
-        println!("{} Copies are identical.", style("✓").green());
+        println!("{} Copies are identical.", theme::ok());
         Ok(EXIT_OK)
     } else {
         Ok(EXIT_CONFLICTS)
@@ -2530,28 +2707,38 @@ fn link_command(config: &Config, args: LinkArgs, dry_run: bool) -> Result<u8> {
         }
     }
     if links.is_empty() {
-        println!("All requested links already exist.");
+        println!("{}", theme::dim("All requested links already exist."));
         return Ok(EXIT_OK);
     }
-    println!("Detected:");
+    println!("{}", theme::heading("DETECTED"));
     for target in &target_ids {
-        println!("  {} {}", style("✓").green(), target_label(target));
+        println!("  {} {}", theme::ok(), theme::agent(&target_label(target)));
     }
     if dry_run || VERBOSITY.load(Ordering::Relaxed) > 0 {
-        println!("{}", Style::new().bold().apply_to("PLAN"));
+        println!("{}", theme::heading("PLAN"));
         for path in &create_targets {
-            println!("CREATE TARGET  {}", display_path(path));
+            println!(
+                "{}  {}",
+                theme::action("CREATE TARGET"),
+                theme::path_text(&display_path(path))
+            );
         }
         for (link, target) in &links {
             println!(
-                "LINK\n  {}\n    -> {}",
-                display_path(link),
-                display_path(&managed_link_value(target, link, config.relative_links))
+                "{}\n  {}\n    {} {}",
+                theme::action("LINK"),
+                theme::path_text(&display_path(link)),
+                theme::arrow(),
+                theme::path_text(&display_path(&managed_link_value(
+                    target,
+                    link,
+                    config.relative_links
+                )))
             );
         }
     }
     if dry_run {
-        println!("Dry run; no files changed.");
+        println!("{}", theme::dim("Dry run; no files changed."));
         return Ok(EXIT_OK);
     }
     let prompt = if inferred_all_targets {
@@ -2580,10 +2767,14 @@ fn link_command(config: &Config, args: LinkArgs, dry_run: bool) -> Result<u8> {
         created.push(link.clone());
     }
     let created_count = links.len();
-    println!("{} {created_count} links created", style("✓").green());
+    println!(
+        "{} {} links created",
+        theme::ok(),
+        theme::good_count(created_count)
+    );
     let after = scan(config)?;
     if result_exit(&after) == EXIT_OK {
-        println!("{} No skill issues.", style("✓").green());
+        println!("{} No skill issues.", theme::ok());
     }
     Ok(EXIT_OK)
 }
@@ -2608,6 +2799,194 @@ fn restore_command(config: &Config, dry_run: bool) -> Result<u8> {
         },
         dry_run,
     )
+}
+
+fn sync_command(config: &Config, check: bool, dry_run: bool) -> Result<u8> {
+    if check && dry_run {
+        bail!("--check is already read-only and cannot be combined with --dry-run");
+    }
+    if JSON_OUTPUT.load(Ordering::Relaxed) && !check {
+        bail!("--json requires `si sync --check`");
+    }
+
+    let initial = git_health(&config.root)?;
+    if !initial.repository {
+        bail!(
+            "canonical root is not a Git repository: {}",
+            config.root.display()
+        );
+    }
+    if initial.upstream.is_none() {
+        return render_sync_check(config, initial, false);
+    }
+    if dry_run {
+        println!("{}", theme::heading("SYNC PLAN"));
+        println!(
+            "{}    {}",
+            theme::action("FETCH"),
+            theme::agent(initial.upstream.as_deref().unwrap_or("upstream"))
+        );
+        println!("{}     fast-forward only", theme::action("PULL"));
+        println!(
+            "{}   canonical skills into every enabled target",
+            theme::action("RELINK")
+        );
+        println!(
+            "{}",
+            theme::dim("Dry run; no files changed and no remote refs fetched.")
+        );
+        return Ok(if sync_is_current(config, &initial)? {
+            EXIT_OK
+        } else {
+            EXIT_ISSUES
+        });
+    }
+
+    run_git_checked(&config.root, &["fetch", "--quiet"], "fetch upstream")?;
+    let fetched = git_health(&config.root)?;
+    if check {
+        return render_sync_check(config, fetched, true);
+    }
+    if fetched.dirty {
+        bail!("canonical repository has uncommitted changes; commit or stash them before syncing");
+    }
+    let ahead = fetched.ahead.unwrap_or(0);
+    let behind = fetched.behind.unwrap_or(0);
+    if ahead > 0 && behind > 0 {
+        bail!(
+            "canonical repository has diverged ({ahead} ahead, {behind} behind); reconcile it with Git before syncing"
+        );
+    }
+
+    println!("{}", theme::heading("SYNC PLAN"));
+    if behind > 0 {
+        println!(
+            "{}     {} commit(s), fast-forward only",
+            theme::action("PULL"),
+            theme::count(behind)
+        );
+    } else {
+        println!(
+            "{}     already at the fetched remote revision",
+            theme::action("PULL")
+        );
+    }
+    println!(
+        "{}   canonical skills into every enabled target",
+        theme::action("RELINK")
+    );
+    require_confirmation_with_default("Apply this sync?", true)?;
+
+    if behind > 0 {
+        run_git_checked(
+            &config.root,
+            &["pull", "--ff-only", "--quiet"],
+            "fast-forward canonical repository",
+        )?;
+        println!("{} Canonical repository updated", theme::ok());
+    } else {
+        println!("{} Canonical repository already current", theme::ok());
+    }
+
+    ASSUME_YES.store(true, Ordering::Relaxed);
+    let link_code = restore_command(config, false)?;
+    let final_health = git_health(&config.root)?;
+    if final_health.ahead.unwrap_or(0) > 0 {
+        println!(
+            "{} Local canonical commits have not been pushed; run {} in {}",
+            theme::warn(),
+            theme::hint("git push"),
+            theme::path(&config.root)
+        );
+        return Ok(link_code.max(EXIT_ISSUES));
+    }
+    println!("{} This computer is in sync.", theme::ok());
+    Ok(link_code)
+}
+
+fn run_git_checked(root: &Path, args: &[&str], action: &str) -> Result<()> {
+    let output = git_output(root, args)?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let detail = String::from_utf8_lossy(&output.stderr);
+    bail!("{action} failed: {}", detail.trim());
+}
+
+fn sync_is_current(config: &Config, git: &GitHealth) -> Result<bool> {
+    Ok(git.repository
+        && !git.dirty
+        && git.upstream.is_some()
+        && git.ahead == Some(0)
+        && git.behind == Some(0)
+        && result_exit(&scan(config)?) == EXIT_OK)
+}
+
+fn render_sync_check(config: &Config, git: GitHealth, fetched: bool) -> Result<u8> {
+    let scan = scan(config)?;
+    let links_healthy = result_exit(&scan) == EXIT_OK;
+    let mut reasons = Vec::new();
+    if !git.repository {
+        reasons.push("canonical root is not a Git repository".to_string());
+    }
+    if git.dirty {
+        reasons.push("canonical repository has uncommitted changes".to_string());
+    }
+    if git.upstream.is_none() {
+        reasons.push("canonical repository has no upstream".to_string());
+    }
+    if let Some(ahead) = git.ahead.filter(|count| *count > 0) {
+        reasons.push(format!("{ahead} local commit(s) have not been pushed"));
+    }
+    if let Some(behind) = git.behind.filter(|count| *count > 0) {
+        reasons.push(format!("{behind} remote commit(s) have not been pulled"));
+    }
+    if !links_healthy {
+        reasons.push("one or more agent links need repair".to_string());
+    }
+    let synced = reasons.is_empty();
+
+    if JSON_OUTPUT.load(Ordering::Relaxed) {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "synced": synced,
+                "fetched": fetched,
+                "git": git,
+                "links_healthy": links_healthy,
+                "reasons": reasons,
+            }))?
+        );
+    } else {
+        println!("{}", theme::banner("sync status"));
+        print_git_health(&git);
+        println!(
+            "\n{}",
+            if links_healthy {
+                format!(
+                    "{} agent links {}",
+                    theme::ok(),
+                    theme::good_count("healthy")
+                )
+            } else {
+                format!(
+                    "{} agent links {}",
+                    theme::warn(),
+                    theme::warn_count("need repair")
+                )
+            }
+        );
+        if synced {
+            println!("\n{} This computer is in sync.", theme::ok());
+        } else {
+            println!("\n{}", theme::heading("OUT OF SYNC"));
+            for reason in &reasons {
+                println!("{} {reason}", theme::warn());
+            }
+            println!("Run: {}", theme::hint("si sync"));
+        }
+    }
+    Ok(if synced { EXIT_OK } else { EXIT_ISSUES })
 }
 
 fn canonical_skill_names(root: &Path) -> Result<Vec<String>> {
@@ -2656,23 +3035,226 @@ fn unlink_command(config: &Config, args: UnlinkArgs, dry_run: bool) -> Result<u8
         }
         links.push(path);
     }
-    println!("{}", Style::new().bold().apply_to("PLAN"));
+    println!("{}", theme::heading("PLAN"));
     for path in &links {
-        println!("UNLINK  {}", path.display());
+        println!("{}  {}", theme::action("UNLINK"), theme::path(path));
     }
     println!(
         "Canonical skill remains: {}",
-        config.root.join(&args.skill).display()
+        theme::path(&config.root.join(&args.skill))
     );
     if dry_run {
-        println!("Dry run; no files changed.");
+        println!("{}", theme::dim("Dry run; no files changed."));
         return Ok(EXIT_OK);
     }
     require_confirmation("Remove these links?")?;
     for path in links {
         fs::remove_file(&path)?;
-        println!("{} Removed {}", style("✓").green(), path.display());
+        println!("{} Removed {}", theme::ok(), theme::path(&path));
     }
+    Ok(EXIT_OK)
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct SkillTogglePlan {
+    pub skill: String,
+    pub enable: bool,
+    actions: Vec<SkillToggleAction>,
+    create_targets: Vec<PathBuf>,
+    relative_links: bool,
+}
+
+#[derive(Clone, Debug)]
+enum SkillToggleAction {
+    Link {
+        path: PathBuf,
+        canonical: PathBuf,
+    },
+    Unlink {
+        path: PathBuf,
+        raw_target: PathBuf,
+        canonical: PathBuf,
+    },
+}
+
+impl SkillTogglePlan {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.actions.is_empty()
+    }
+
+    pub(crate) fn action_count(&self) -> usize {
+        self.actions.len()
+    }
+
+    pub(crate) fn paths(&self) -> impl Iterator<Item = &Path> {
+        self.actions.iter().map(|action| match action {
+            SkillToggleAction::Link { path, .. } | SkillToggleAction::Unlink { path, .. } => {
+                path.as_path()
+            }
+        })
+    }
+
+    pub(crate) fn apply(&self) -> Result<()> {
+        if self.enable {
+            self.apply_links()
+        } else {
+            self.apply_unlinks()
+        }
+    }
+
+    fn apply_links(&self) -> Result<()> {
+        for path in &self.create_targets {
+            fs::create_dir_all(path).with_context(|| format!("create {}", path.display()))?;
+        }
+        let mut created = Vec::new();
+        for action in &self.actions {
+            let SkillToggleAction::Link { path, canonical } = action else {
+                continue;
+            };
+            if let Err(error) = create_managed_symlink(canonical, path, self.relative_links)
+                .and_then(|_| verify_link(path, canonical))
+            {
+                for created_path in created.iter().rev() {
+                    let _ = fs::remove_file(created_path);
+                }
+                return Err(error).context("enable operation rolled back");
+            }
+            created.push(path.clone());
+        }
+        Ok(())
+    }
+
+    fn apply_unlinks(&self) -> Result<()> {
+        let mut removed = Vec::<(PathBuf, PathBuf)>::new();
+        for action in &self.actions {
+            let SkillToggleAction::Unlink {
+                path,
+                raw_target,
+                canonical,
+            } = action
+            else {
+                continue;
+            };
+            if let Err(error) = verify_link(path, canonical).and_then(|_| {
+                fs::remove_file(path).with_context(|| format!("remove {}", path.display()))
+            }) {
+                for (removed_path, removed_target) in removed.iter().rev() {
+                    let _ = create_symlink(removed_target, removed_path);
+                }
+                return Err(error).context("disable operation rolled back");
+            }
+            removed.push((path.clone(), raw_target.clone()));
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn plan_skill_toggle(
+    config: &Config,
+    skill: &str,
+    enable: bool,
+) -> Result<SkillTogglePlan> {
+    validate_skill_name(skill)?;
+    let canonical = config.root.join(skill);
+    let metadata = fs::symlink_metadata(&canonical)
+        .with_context(|| format!("canonical skill does not exist: {}", canonical.display()))?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        bail!(
+            "canonical skill does not exist as a real directory: {}",
+            canonical.display()
+        );
+    }
+    if enable && !config.targets.values().any(|target| target.enabled) {
+        bail!("no enabled targets were detected; add one with `si targets add`");
+    }
+
+    let mut actions = Vec::new();
+    let mut create_targets = BTreeSet::new();
+    for target in config.targets.values().filter(|target| target.enabled) {
+        let path = target.path.join(skill);
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                let raw_target = fs::read_link(&path)?;
+                let resolved = resolve_link_path(&path, &raw_target);
+                if resolved != canonical {
+                    bail!(
+                        "refusing to {} foreign symlink {}",
+                        if enable { "replace" } else { "remove" },
+                        path.display()
+                    );
+                }
+                if !enable {
+                    actions.push(SkillToggleAction::Unlink {
+                        path,
+                        raw_target,
+                        canonical: canonical.clone(),
+                    });
+                }
+            }
+            Ok(_) => bail!(
+                "refusing to {} physical directory {}",
+                if enable { "replace" } else { "remove" },
+                path.display()
+            ),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                if enable {
+                    if !target.path.exists() {
+                        create_targets.insert(target.path.clone());
+                    }
+                    actions.push(SkillToggleAction::Link {
+                        path,
+                        canonical: canonical.clone(),
+                    });
+                }
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+
+    Ok(SkillTogglePlan {
+        skill: skill.to_string(),
+        enable,
+        actions,
+        create_targets: create_targets.into_iter().collect(),
+        relative_links: config.relative_links,
+    })
+}
+
+fn toggle_skill_command(config: &Config, skill: &str, enable: bool, dry_run: bool) -> Result<u8> {
+    let plan = plan_skill_toggle(config, skill, enable)?;
+    let verb = if enable { "ENABLE" } else { "DISABLE" };
+    if plan.is_empty() {
+        println!(
+            "{} is already {}.",
+            theme::skill(skill),
+            if enable { "enabled" } else { "disabled" }
+        );
+        return Ok(EXIT_OK);
+    }
+    println!("{}", theme::heading("PLAN"));
+    for path in plan.paths() {
+        println!("{}  {}", theme::action(verb), theme::path(path));
+    }
+    println!(
+        "Canonical skill remains: {}",
+        theme::path(&config.root.join(skill))
+    );
+    if dry_run {
+        println!("{}", theme::dim("Dry run; no files changed."));
+        return Ok(EXIT_OK);
+    }
+    require_confirmation(&format!(
+        "{} {skill} for all configured agents?",
+        if enable { "Enable" } else { "Disable" }
+    ))?;
+    plan.apply()?;
+    println!(
+        "{} {} {} for {} agents",
+        theme::ok(),
+        theme::skill(skill),
+        if enable { "enabled" } else { "disabled" },
+        theme::good_count(plan.action_count())
+    );
     Ok(EXIT_OK)
 }
 
@@ -2687,16 +3269,23 @@ fn targets_command(
                 println!("{}", serde_json::to_string_pretty(&config.targets)?);
                 return Ok(EXIT_OK);
             }
-            println!("TARGET       PATH                                      STATUS");
+            println!(
+                "{}",
+                theme::dim("TARGET       PATH                                      STATUS")
+            );
             for (id, target) in &config.targets {
                 let status = if !target.enabled {
-                    "disabled"
+                    theme::dim("disabled")
                 } else if target.path.is_dir() {
-                    "✓"
+                    theme::good_count("✓")
                 } else {
-                    "missing"
+                    theme::warn_count("missing")
                 };
-                println!("{id:<12} {:<41} {status}", target.path.display());
+                println!(
+                    "{} {} {status}",
+                    theme::agent_padded(id, 12),
+                    theme::path_text(&format!("{:<41}", target.path.display()))
+                );
             }
         }
         Some(TargetCommand::Add { id, path }) => {
@@ -2713,24 +3302,34 @@ fn targets_command(
                 },
             );
             validate_config(&config)?;
-            println!("ADD TARGET {id}  {}", path.display());
+            println!(
+                "{} {}  {}",
+                theme::action("ADD TARGET"),
+                theme::agent(&id),
+                theme::path(&path)
+            );
             if !dry_run {
                 config.save()?;
-                println!("{} Target added", style("✓").green());
+                println!("{} Target added", theme::ok());
             } else {
-                println!("Dry run; no files changed.");
+                println!("{}", theme::dim("Dry run; no files changed."));
             }
         }
         Some(TargetCommand::Remove { id }) => {
             if config.targets.remove(&id).is_none() {
                 bail!("unknown target `{id}`");
             }
-            println!("REMOVE TARGET {id}\nFilesystem data will not be removed.");
+            println!(
+                "{} {}\n{}",
+                theme::action("REMOVE TARGET"),
+                theme::agent(&id),
+                theme::dim("Filesystem data will not be removed.")
+            );
             if !dry_run {
                 config.save()?;
-                println!("{} Target removed from configuration", style("✓").green());
+                println!("{} Target removed from configuration", theme::ok());
             } else {
-                println!("Dry run; no files changed.");
+                println!("{}", theme::dim("Dry run; no files changed."));
             }
         }
     }
@@ -2763,7 +3362,10 @@ fn config_command(mut config: Config, command: Option<ConfigCommand>, dry_run: b
         Some(ConfigCommand::SetRoot { root }) => {
             let new_root = absolute_path(&root)?;
             if new_root == config.root {
-                println!("Canonical root is already {}", new_root.display());
+                println!(
+                    "Canonical root is already {}",
+                    theme::path_text(&new_root.display().to_string())
+                );
                 return Ok(EXIT_OK);
             }
             let current = scan(&config)?;
@@ -2782,29 +3384,35 @@ fn config_command(mut config: Config, command: Option<ConfigCommand>, dry_run: b
             config.root = new_root.clone();
             validate_config(&config)?;
             println!(
-                "SET ROOT\n  {}\n    -> {}",
-                old.display(),
-                new_root.display()
+                "{}\n  {}\n    {} {}",
+                theme::action("SET ROOT"),
+                theme::path(&old),
+                theme::arrow(),
+                theme::path(&new_root)
             );
             if !dry_run {
                 fs::create_dir_all(&new_root)?;
                 config.save()?;
-                println!("{} Canonical root updated", style("✓").green());
+                println!("{} Canonical root updated", theme::ok());
             } else {
-                println!("Dry run; no files changed.");
+                println!("{}", theme::dim("Dry run; no files changed."));
             }
         }
         Some(ConfigCommand::SetRelativeLinks { enabled }) => {
-            println!("SET RELATIVE LINKS  {enabled}");
+            println!(
+                "{}  {}",
+                theme::action("SET RELATIVE LINKS"),
+                theme::count(enabled)
+            );
             config.relative_links = enabled;
             if !dry_run {
                 config.save()?;
                 println!(
                     "{} Link style updated; existing links are unchanged",
-                    style("✓").green()
+                    theme::ok()
                 );
             } else {
-                println!("Dry run; no files changed.");
+                println!("{}", theme::dim("Dry run; no files changed."));
             }
         }
         Some(ConfigCommand::AddIgnore { pattern }) => {
@@ -2812,12 +3420,16 @@ fn config_command(mut config: Config, command: Option<ConfigCommand>, dry_run: b
             if config.ignore.contains(&pattern) {
                 bail!("ignore pattern already exists: {pattern}");
             }
-            println!("ADD IGNORE  {pattern}");
+            println!(
+                "{}  {}",
+                theme::action("ADD IGNORE"),
+                theme::skill(&pattern)
+            );
             config.ignore.push(pattern);
             if !dry_run {
                 config.save()?;
             } else {
-                println!("Dry run; no files changed.");
+                println!("{}", theme::dim("Dry run; no files changed."));
             }
         }
         Some(ConfigCommand::RemoveIgnore { pattern }) => {
@@ -2826,11 +3438,15 @@ fn config_command(mut config: Config, command: Option<ConfigCommand>, dry_run: b
             if config.ignore.len() == before {
                 bail!("ignore pattern not found: {pattern}");
             }
-            println!("REMOVE IGNORE  {pattern}");
+            println!(
+                "{}  {}",
+                theme::action("REMOVE IGNORE"),
+                theme::skill(&pattern)
+            );
             if !dry_run {
                 config.save()?;
             } else {
-                println!("Dry run; no files changed.");
+                println!("{}", theme::dim("Dry run; no files changed."));
             }
         }
     }
@@ -3215,6 +3831,41 @@ mod tests {
             filetime::FileTime::from_last_modification_time(&copied),
             timestamp
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn enabling_rolls_back_links_when_a_later_target_changes() {
+        let (_temp, config) = fixture();
+        skill(&config.root.join("foo"), "body");
+        let plan = plan_skill_toggle(&config, "foo", true).unwrap();
+        fs::remove_dir(&config.targets["codex"].path).unwrap();
+        fs::write(&config.targets["codex"].path, "now a file").unwrap();
+
+        assert!(plan.apply().is_err());
+        assert!(!config.targets["claude"].path.join("foo").exists());
+        assert!(config.root.join("foo").is_dir());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn disabling_restores_removed_links_when_a_later_target_changes() {
+        let (_temp, config) = fixture();
+        let canonical = config.root.join("foo");
+        skill(&canonical, "body");
+        let claude = config.targets["claude"].path.join("foo");
+        let codex = config.targets["codex"].path.join("foo");
+        std::os::unix::fs::symlink(&canonical, &claude).unwrap();
+        std::os::unix::fs::symlink(&canonical, &codex).unwrap();
+        let plan = plan_skill_toggle(&config, "foo", false).unwrap();
+        fs::remove_file(&codex).unwrap();
+        skill(&codex, "changed concurrently");
+
+        assert!(plan.apply().is_err());
+        assert!(claude.is_symlink());
+        verify_link(&claude, &canonical).unwrap();
+        assert!(codex.is_dir());
+        assert!(canonical.is_dir());
     }
 
     #[test]
