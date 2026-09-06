@@ -87,6 +87,8 @@ pub enum Command {
     Disable { skill: String },
     /// Expose a canonical skill to every configured agent.
     Enable { skill: String },
+    /// Permanently delete a canonical skill and every link to it.
+    Delete { skill: String },
     /// List or edit target directories.
     Targets {
         #[command(subcommand)]

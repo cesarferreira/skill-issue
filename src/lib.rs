@@ -136,6 +136,7 @@ pub fn run(cli: Cli) -> Result<u8> {
                 Command::Enable { skill } => {
                     toggle_skill_command(&config, &skill, true, cli.dry_run)
                 }
+                Command::Delete { skill } => delete_skill_command(&config, &skill, cli.dry_run),
                 Command::Targets { command } => targets_command(config, command, cli.dry_run),
                 Command::Config { command } => config_command(config, command, cli.dry_run),
                 Command::Restore => restore_command(&config, cli.dry_run),
@@ -3272,6 +3273,93 @@ fn toggle_skill_command(config: &Config, skill: &str, enable: bool, dry_run: boo
         if enable { "enabled" } else { "disabled" },
         theme::good_count(plan.action_count())
     );
+    Ok(EXIT_OK)
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct SkillDeletePlan {
+    pub skill: String,
+    canonical: PathBuf,
+    links: Vec<PathBuf>,
+}
+
+impl SkillDeletePlan {
+    pub(crate) fn link_count(&self) -> usize {
+        self.links.len()
+    }
+
+    pub(crate) fn links(&self) -> impl Iterator<Item = &Path> {
+        self.links.iter().map(PathBuf::as_path)
+    }
+
+    pub(crate) fn canonical(&self) -> &Path {
+        &self.canonical
+    }
+
+    pub(crate) fn apply(&self) -> Result<()> {
+        for link in &self.links {
+            fs::remove_file(link).with_context(|| format!("remove {}", link.display()))?;
+        }
+        fs::remove_dir_all(&self.canonical)
+            .with_context(|| format!("remove {}", self.canonical.display()))?;
+        Ok(())
+    }
+}
+
+pub(crate) fn plan_skill_delete(config: &Config, skill: &str) -> Result<SkillDeletePlan> {
+    validate_skill_name(skill)?;
+    let canonical = config.root.join(skill);
+    let metadata = fs::symlink_metadata(&canonical)
+        .with_context(|| format!("canonical skill does not exist: {}", canonical.display()))?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        bail!(
+            "canonical skill does not exist as a real directory: {}",
+            canonical.display()
+        );
+    }
+    let mut links = Vec::new();
+    for target in config.targets.values().filter(|target| target.enabled) {
+        let path = target.path.join(skill);
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                let raw_target = fs::read_link(&path)?;
+                let resolved = resolve_link_path(&path, &raw_target);
+                if resolved == canonical {
+                    links.push(path);
+                }
+            }
+            Ok(_) | Err(_) => {}
+        }
+    }
+    Ok(SkillDeletePlan {
+        skill: skill.to_string(),
+        canonical,
+        links,
+    })
+}
+
+fn delete_skill_command(config: &Config, skill: &str, dry_run: bool) -> Result<u8> {
+    let plan = plan_skill_delete(config, skill)?;
+    println!("{}", theme::heading("PLAN"));
+    for link in plan.links() {
+        println!("{}  {}", theme::action("UNLINK"), theme::path(link));
+    }
+    println!(
+        "{}  {}",
+        theme::action("DELETE"),
+        theme::path(plan.canonical())
+    );
+    if dry_run {
+        println!("{}", theme::dim("Dry run; no files changed."));
+        return Ok(EXIT_OK);
+    }
+    require_confirmation(&format!(
+        "Permanently delete `{skill}` and its {} link{}? This cannot be undone.",
+        plan.link_count(),
+        if plan.link_count() == 1 { "" } else { "s" }
+    ))?;
+    plan.apply()?;
+    println!("{} Deleted {}", theme::ok(), theme::skill(skill));
     Ok(EXIT_OK)
 }
 
