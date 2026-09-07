@@ -69,9 +69,18 @@ struct MigrationStats {
 #[derive(Clone, Debug)]
 enum CanonicalTransfer {
     Existing,
-    Move { source: PathBuf },
-    Copy { source: PathBuf, temporary: PathBuf },
-    Replace { source: PathBuf, backup: PathBuf },
+    Move {
+        source: PathBuf,
+    },
+    Copy {
+        source: PathBuf,
+        temporary: PathBuf,
+    },
+    Replace {
+        source: PathBuf,
+        backup: PathBuf,
+        temporary: Option<PathBuf>,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -1876,6 +1885,24 @@ fn plan_promote_version_at(
     installations: Vec<PathBuf>,
     archive_root: PathBuf,
 ) -> Result<AdoptionPlan> {
+    plan_promote_version_at_with_mode(
+        config,
+        group,
+        fingerprint,
+        installations,
+        archive_root,
+        None,
+    )
+}
+
+fn plan_promote_version_at_with_mode(
+    config: &Config,
+    group: &SkillGroup,
+    fingerprint: String,
+    installations: Vec<PathBuf>,
+    archive_root: PathBuf,
+    force_copy: Option<bool>,
+) -> Result<AdoptionPlan> {
     let canonical = group
         .canonical
         .as_ref()
@@ -1884,6 +1911,7 @@ fn plan_promote_version_at(
         .first()
         .cloned()
         .ok_or_else(|| anyhow!("no physical source to promote for {}", group.name))?;
+    let copies_source = force_copy.unwrap_or_else(|| !same_filesystem(&source, &config.root));
     let mut plan = AdoptionPlan {
         display_name: group.name.clone(),
         canonical: canonical.path.clone(),
@@ -1891,11 +1919,13 @@ fn plan_promote_version_at(
         transfer: CanonicalTransfer::Replace {
             source: source.clone(),
             backup: unique_sibling(&canonical.path, "backup"),
+            temporary: copies_source.then(|| unique_sibling(&canonical.path, "tmp")),
         },
         replacements: installations
             .into_iter()
             .map(|original| Replacement {
-                backup: (original != source).then(|| unique_sibling(&original, "backup")),
+                backup: (copies_source || original != source)
+                    .then(|| unique_sibling(&original, "backup")),
                 original,
             })
             .collect(),
@@ -2273,9 +2303,20 @@ fn render_adoption_plans(plans: &[AdoptionPlan]) {
                 println!("{}  {}", theme::action("VERIFY"), theme::path(temporary));
                 step("MOVE", temporary, &plan.canonical);
             }
-            CanonicalTransfer::Replace { source, backup } => {
-                step("STAGE", &plan.canonical, backup);
-                step("PROMOTE", source, &plan.canonical);
+            CanonicalTransfer::Replace {
+                source,
+                backup,
+                temporary,
+            } => {
+                if let Some(temporary) = temporary {
+                    step("COPY", source, temporary);
+                    println!("{}  {}", theme::action("VERIFY"), theme::path(temporary));
+                    step("STAGE", &plan.canonical, backup);
+                    step("PROMOTE", temporary, &plan.canonical);
+                } else {
+                    step("STAGE", &plan.canonical, backup);
+                    step("PROMOTE", source, &plan.canonical);
+                }
             }
         }
         println!(
@@ -2375,7 +2416,24 @@ fn execute_adoption(plan: &AdoptionPlan) -> Result<()> {
             }
             None
         }
-        CanonicalTransfer::Replace { source, backup } => {
+        CanonicalTransfer::Replace {
+            source,
+            backup,
+            temporary,
+        } => {
+            if let Some(temporary) = temporary
+                && let Err(error) = copy_skill(source, temporary).and_then(|_| {
+                    let actual = fingerprint_with_ignores(temporary, &plan.ignore)?;
+                    if actual != plan.fingerprint {
+                        bail!("verification failed while copying {}", source.display());
+                    }
+                    Ok(())
+                })
+            {
+                let _ = fs::remove_dir_all(temporary);
+                return Err(error)
+                    .with_context(|| format!("copy promoted skill {}", source.display()));
+            }
             fs::rename(&plan.canonical, backup).with_context(|| {
                 format!(
                     "stage canonical {} at {}",
@@ -2383,8 +2441,12 @@ fn execute_adoption(plan: &AdoptionPlan) -> Result<()> {
                     backup.display()
                 )
             })?;
-            if let Err(error) = fs::rename(source, &plan.canonical) {
+            let promoted = temporary.as_ref().unwrap_or(source);
+            if let Err(error) = fs::rename(promoted, &plan.canonical) {
                 let _ = fs::rename(backup, &plan.canonical);
+                if let Some(temporary) = temporary {
+                    let _ = fs::remove_dir_all(temporary);
+                }
                 return Err(error).with_context(|| {
                     format!(
                         "promote {} to {}",
@@ -2393,16 +2455,24 @@ fn execute_adoption(plan: &AdoptionPlan) -> Result<()> {
                     )
                 });
             }
-            Some(source.clone())
+            temporary.is_none().then(|| source.clone())
         }
     };
     let replaced_canonical = match &plan.transfer {
-        CanonicalTransfer::Replace { source, backup } => Some((source, backup)),
+        CanonicalTransfer::Replace {
+            source,
+            backup,
+            temporary,
+        } => Some((source, backup, temporary.is_none())),
         _ => None,
     };
     if fingerprint_with_ignores(&plan.canonical, &plan.ignore)? != plan.fingerprint {
-        if let Some((source, backup)) = replaced_canonical {
-            let _ = fs::rename(&plan.canonical, source);
+        if let Some((source, backup, moved_source)) = replaced_canonical {
+            if moved_source {
+                let _ = fs::rename(&plan.canonical, source);
+            } else {
+                let _ = fs::remove_dir_all(&plan.canonical);
+            }
             let _ = fs::rename(backup, &plan.canonical);
         } else if let Some(source) = &moved_source {
             let _ = fs::rename(&plan.canonical, source);
@@ -2441,8 +2511,12 @@ fn execute_adoption(plan: &AdoptionPlan) -> Result<()> {
         for (original, backup) in staged.iter().rev() {
             let _ = fs::rename(backup, original);
         }
-        if let Some((source, backup)) = replaced_canonical {
-            let _ = fs::rename(&plan.canonical, source);
+        if let Some((source, backup, moved_source)) = replaced_canonical {
+            if moved_source {
+                let _ = fs::rename(&plan.canonical, source);
+            } else {
+                let _ = fs::remove_dir_all(&plan.canonical);
+            }
             let _ = fs::rename(backup, &plan.canonical);
         } else if let Some(source) = &moved_source {
             let _ = fs::rename(&plan.canonical, source);
@@ -2459,7 +2533,7 @@ fn execute_adoption(plan: &AdoptionPlan) -> Result<()> {
             );
         }
     }
-    if let Some((_, backup)) = replaced_canonical
+    if let Some((_, backup, _)) = replaced_canonical
         && let Err(error) = fs::remove_dir_all(backup)
     {
         eprintln!(
@@ -4344,6 +4418,84 @@ mod tests {
             scan(&config).unwrap().groups["stax"].status(),
             SkillStatus::Managed
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn promoting_across_filesystems_copies_then_relinks_every_target() {
+        let (temp, config) = fixture();
+        let canonical = config.root.join("stax");
+        let claude = config.targets["claude"].path.join("stax");
+        let codex = config.targets["codex"].path.join("stax");
+        skill(&canonical, "old canonical");
+        skill(&claude, "new version");
+        skill(&codex, "new version");
+        let result = scan(&config).unwrap();
+        let group = &result.groups["stax"];
+        let selected = fingerprint(&claude).unwrap();
+        let archive = temp.path().join("archive/stax");
+        let plan = plan_promote_version_at_with_mode(
+            &config,
+            group,
+            selected,
+            vec![claude.clone(), codex.clone()],
+            archive.clone(),
+            Some(true),
+        )
+        .unwrap();
+
+        execute_adoption(&plan).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(canonical.join("SKILL.md")).unwrap(),
+            "new version"
+        );
+        assert_eq!(
+            fs::read_to_string(archive.join("canonical/SKILL.md")).unwrap(),
+            "old canonical"
+        );
+        assert!(archive.join("canonical.manifest.json").is_file());
+        assert_eq!(fs::read_link(&claude).unwrap(), canonical);
+        assert_eq!(fs::read_link(&codex).unwrap(), canonical);
+        assert_eq!(
+            scan(&config).unwrap().groups["stax"].status(),
+            SkillStatus::Managed
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cross_filesystem_promotion_rolls_back_canonical_and_source_on_link_failure() {
+        let (temp, config) = fixture();
+        let canonical = config.root.join("stax");
+        let claude = config.targets["claude"].path.join("stax");
+        let missing = config.targets["codex"].path.join("missing");
+        skill(&canonical, "old canonical");
+        skill(&claude, "new version");
+        let result = scan(&config).unwrap();
+        let group = &result.groups["stax"];
+        let selected = fingerprint(&claude).unwrap();
+        let plan = plan_promote_version_at_with_mode(
+            &config,
+            group,
+            selected,
+            vec![claude.clone(), missing.clone()],
+            temp.path().join("archive/stax"),
+            Some(true),
+        )
+        .unwrap();
+
+        assert!(execute_adoption(&plan).is_err());
+
+        assert_eq!(
+            fs::read_to_string(canonical.join("SKILL.md")).unwrap(),
+            "old canonical"
+        );
+        assert_eq!(
+            fs::read_to_string(claude.join("SKILL.md")).unwrap(),
+            "new version"
+        );
+        assert!(!missing.exists());
     }
 
     #[cfg(unix)]
