@@ -443,3 +443,215 @@ fn bare_si_is_read_only_status() {
         "different"
     );
 }
+
+#[test]
+fn status_and_targets_emit_machine_readable_json() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("root");
+    let target = temp.path().join("target");
+    skill(&root.join("foo"), "canonical");
+    fs::create_dir_all(&target).unwrap();
+    let config = temp.path().join("config.toml");
+    write_config(&config, &root, &[("agent", &target)]);
+
+    let status = cargo_bin_cmd!("si")
+        .env("SKILL_ISSUE_CONFIG", &config)
+        .args(["--json", "status"])
+        .output()
+        .unwrap();
+    assert_eq!(status.status.code(), Some(2));
+    let status: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(status["skills"][0]["name"], "foo");
+
+    let targets = cargo_bin_cmd!("si")
+        .env("SKILL_ISSUE_CONFIG", &config)
+        .args(["--json", "targets"])
+        .output()
+        .unwrap();
+    assert!(targets.status.success());
+    let targets: serde_json::Value = serde_json::from_slice(&targets.stdout).unwrap();
+    assert_eq!(targets["agent"]["path"], target.to_string_lossy().as_ref());
+    assert_eq!(targets["agent"]["enabled"], true);
+}
+
+#[test]
+fn diff_reports_text_changes_and_json_changes() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("root");
+    let target = temp.path().join("target");
+    skill(&root.join("foo"), "canonical");
+    skill(&target.join("foo"), "local");
+    let config = temp.path().join("config.toml");
+    write_config(&config, &root, &[("agent", &target)]);
+
+    cargo_bin_cmd!("si")
+        .env("SKILL_ISSUE_CONFIG", &config)
+        .args(["diff", "foo", "--content", "--no-color"])
+        .assert()
+        .code(3)
+        .stdout(predicate::str::contains("SKILL.md"))
+        .stdout(predicate::str::contains("-canonical"))
+        .stdout(predicate::str::contains("+local"));
+
+    let output = cargo_bin_cmd!("si")
+        .env("SKILL_ISSUE_CONFIG", &config)
+        .args(["--json", "diff", "foo"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(3));
+    let diff: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(diff["skill"], "foo");
+    assert_eq!(diff["changes"][0]["status"], "M");
+    assert_eq!(diff["changes"][0]["path"], "SKILL.md");
+}
+
+#[test]
+fn targets_add_remove_and_validation_update_only_configuration() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("root");
+    fs::create_dir_all(&root).unwrap();
+    let config = temp.path().join("config.toml");
+    write_config(&config, &root, &[]);
+    let added = temp.path().join("new-target");
+
+    cargo_bin_cmd!("si")
+        .env("SKILL_ISSUE_CONFIG", &config)
+        .args([
+            "targets",
+            "add",
+            "extra",
+            added.to_str().unwrap(),
+            "--no-color",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Target added"));
+    assert!(
+        fs::read_to_string(&config)
+            .unwrap()
+            .contains("[targets.extra]")
+    );
+    assert!(!added.exists());
+
+    cargo_bin_cmd!("si")
+        .env("SKILL_ISSUE_CONFIG", &config)
+        .args(["targets", "remove", "extra", "--dry-run", "--no-color"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Dry run; no files changed."));
+    assert!(
+        fs::read_to_string(&config)
+            .unwrap()
+            .contains("[targets.extra]")
+    );
+
+    cargo_bin_cmd!("si")
+        .env("SKILL_ISSUE_CONFIG", &config)
+        .args(["targets", "remove", "extra", "--no-color"])
+        .assert()
+        .success();
+    assert!(
+        !fs::read_to_string(&config)
+            .unwrap()
+            .contains("[targets.extra]")
+    );
+
+    cargo_bin_cmd!("si")
+        .env("SKILL_ISSUE_CONFIG", &config)
+        .args(["targets", "add", "Invalid", added.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("target id must start"));
+}
+
+#[test]
+fn config_commands_persist_changes_and_reject_unsafe_root_moves() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("root");
+    let target = temp.path().join("target");
+    fs::create_dir_all(&root).unwrap();
+    fs::create_dir_all(&target).unwrap();
+    let config = temp.path().join("config.toml");
+    write_config(&config, &root, &[("agent", &target)]);
+
+    cargo_bin_cmd!("si")
+        .env("SKILL_ISSUE_CONFIG", &config)
+        .args(["config", "set-relative-links", "true", "--no-color"])
+        .assert()
+        .success();
+    cargo_bin_cmd!("si")
+        .env("SKILL_ISSUE_CONFIG", &config)
+        .args(["config", "add-ignore", "generated-*", "--no-color"])
+        .assert()
+        .success();
+    let saved = fs::read_to_string(&config).unwrap();
+    assert!(saved.contains("relative_links = true"));
+    assert!(saved.contains("generated-*"));
+
+    cargo_bin_cmd!("si")
+        .env("SKILL_ISSUE_CONFIG", &config)
+        .args(["config", "remove-ignore", "generated-*", "--no-color"])
+        .assert()
+        .success();
+    assert!(!fs::read_to_string(&config).unwrap().contains("generated-*"));
+
+    skill(&root.join("foo"), "canonical");
+    let replacement = temp.path().join("replacement-root");
+    cargo_bin_cmd!("si")
+        .env("SKILL_ISSUE_CONFIG", &config)
+        .args([
+            "config",
+            "set-root",
+            replacement.to_str().unwrap(),
+            "--no-color",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("refusing to change the root"));
+}
+
+#[cfg(unix)]
+#[test]
+fn sync_creates_relative_links_when_configured() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("root");
+    let target = temp.path().join("nested/target");
+    skill(&root.join("foo"), "canonical");
+    fs::create_dir_all(&target).unwrap();
+    let config = temp.path().join("config.toml");
+    write_config(&config, &root, &[("agent", &target)]);
+    fs::write(
+        &config,
+        format!(
+            "relative_links = true\n{}",
+            fs::read_to_string(&config).unwrap()
+        ),
+    )
+    .unwrap();
+
+    cargo_bin_cmd!("si")
+        .env("SKILL_ISSUE_CONFIG", &config)
+        .args(["sync", "--yes", "--no-color"])
+        .assert()
+        .success();
+    let raw_target = fs::read_link(target.join("foo")).unwrap();
+    assert!(raw_target.is_relative());
+    assert_eq!(
+        fs::canonicalize(target.join("foo")).unwrap(),
+        fs::canonicalize(root.join("foo")).unwrap()
+    );
+}
+
+#[test]
+fn invalid_configuration_returns_the_configuration_exit_code() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("config.toml");
+    fs::write(&config, "root = [not-a-path]").unwrap();
+
+    cargo_bin_cmd!("si")
+        .env("SKILL_ISSUE_CONFIG", config)
+        .arg("status")
+        .assert()
+        .code(4)
+        .stderr(predicate::str::contains("Invalid configuration"));
+}

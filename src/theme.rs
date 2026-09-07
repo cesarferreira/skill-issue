@@ -284,11 +284,11 @@ mod tests {
     fn paths_inside_home_are_rendered_with_a_tilde() {
         let home = dirs::home_dir().unwrap();
         assert_eq!(
-            path(&home.join(".codex/skills/android-cli")).to_string(),
+            display_path(&home.join(".codex/skills/android-cli")),
             "~/.codex/skills/android-cli"
         );
         assert_eq!(
-            path(Path::new("/tmp/skill-issue")).to_string(),
+            display_path(Path::new("/tmp/skill-issue")),
             "/tmp/skill-issue"
         );
     }
