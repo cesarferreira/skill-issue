@@ -405,6 +405,28 @@ fn setup_discovers_pi_skills() {
 
 #[cfg(unix)]
 #[test]
+fn setup_adds_pi_to_an_existing_configuration() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join("skills");
+    let pi = home.join(".pi/agent/skills");
+    skill(&pi.join("pi-only"), "pi skill");
+    fs::create_dir_all(&root).unwrap();
+    let config = temp.path().join("config.toml");
+    write_config(&config, &root, &[]);
+
+    cargo_bin_cmd!("si")
+        .env("HOME", &home)
+        .env("SKILL_ISSUE_CONFIG", &config)
+        .args(["setup", "--yes", "--no-color"])
+        .assert()
+        .success();
+
+    assert!(fs::read_to_string(config).unwrap().contains("[targets.pi]"));
+}
+
+#[cfg(unix)]
+#[test]
 fn first_setup_dry_run_only_previews_configuration() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("home");

@@ -343,30 +343,7 @@ fn initial_setup_config(
         }
         None => bail!("a canonical root is required when stdin is not interactive"),
     };
-    let mut targets = BTreeMap::new();
-    if let Some(home) = dirs::home_dir() {
-        for (id, relative) in [
-            ("claude", ".claude/skills"),
-            ("codex", ".codex/skills"),
-            ("gemini", ".gemini/skills"),
-            ("agents", ".agents/skills"),
-            ("opencode", ".config/opencode/skills"),
-            ("hermes", ".hermes/skills"),
-            ("cursor", ".cursor/skills"),
-            ("pi", ".pi/agent/skills"),
-        ] {
-            let path = home.join(relative);
-            if path.is_dir() {
-                targets.insert(
-                    id.to_string(),
-                    TargetConfig {
-                        path,
-                        enabled: true,
-                    },
-                );
-            }
-        }
-    }
+    let targets = detected_targets();
     let config = merge_setup_inputs(
         Config {
             root: root.clone(),
@@ -522,6 +499,9 @@ fn merge_setup_inputs(
     ignore_args: &[String],
 ) -> Result<Config> {
     build_ignore_set(ignore_args)?;
+    for (id, target) in detected_targets() {
+        config.targets.entry(id).or_insert(target);
+    }
     for value in target_args {
         let (id, path) = parse_setup_target(value)?;
         match config.targets.get(&id) {
@@ -549,6 +529,36 @@ fn merge_setup_inputs(
     }
     validate_config(&config)?;
     Ok(config)
+}
+
+fn detected_targets() -> BTreeMap<String, TargetConfig> {
+    let Some(home) = dirs::home_dir() else {
+        return BTreeMap::new();
+    };
+    [
+        ("claude", ".claude/skills"),
+        ("codex", ".codex/skills"),
+        ("gemini", ".gemini/skills"),
+        ("agents", ".agents/skills"),
+        ("opencode", ".config/opencode/skills"),
+        ("hermes", ".hermes/skills"),
+        ("cursor", ".cursor/skills"),
+        ("pi", ".pi/agent/skills"),
+    ]
+    .into_iter()
+    .filter_map(|(id, relative)| {
+        let path = home.join(relative);
+        path.is_dir().then(|| {
+            (
+                id.to_string(),
+                TargetConfig {
+                    path,
+                    enabled: true,
+                },
+            )
+        })
+    })
+    .collect()
 }
 
 fn parse_setup_target(value: &str) -> Result<(String, PathBuf)> {
