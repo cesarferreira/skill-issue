@@ -62,7 +62,11 @@ pub enum Command {
         ignore: Vec<String>,
     },
     /// Collect local skills and synchronize them into configured agent directories.
-    Sync,
+    Sync {
+        /// Replace foreign or broken symlinks when doing so cannot discard divergent content.
+        #[arg(long)]
+        force: bool,
+    },
     /// Show the current health summary.
     Status,
     /// Compare the distinct copies of a skill.

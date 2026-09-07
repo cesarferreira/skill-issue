@@ -62,6 +62,16 @@ si sync
 `si sync` reconciles links after any change to the canonical directory, whether
 the change came from Git or from you editing it directly.
 
+If an existing symlink is owned by another tool, `sync` leaves it alone. Use
+`--force` to replace broken links and foreign links whose contents match the
+canonical skill. Foreign targets are never deleted, and links to divergent
+content still require an explicit resolution:
+
+```bash
+si sync --force --dry-run
+si sync --force
+```
+
 Delete a canonical skill, then remove its stale managed links everywhere:
 
 ```bash
@@ -101,7 +111,8 @@ Useful advanced commands are `si diff <skill>`, `si targets`, and `si config`.
 - A skill has one real directory in the canonical root; agent directories use symlinks.
 - `--dry-run` previews every mutating command without changing files.
 - Identical physical copies can be safely replaced with links.
-- Different copies and foreign symlinks are preserved and reported.
+- Different copies and foreign symlinks are preserved and reported unless a
+  matching foreign link is explicitly replaced with `si sync --force`.
 - `si` never executes skill contents and never runs `git pull`, commits, or pushes.
 
 ## TUI

@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### 🚀 Features
+
+- Add `si sync --force` to safely take over matching foreign and broken links
+
 ## [0.3.0] - 2026-09-06
 
 ### 🚀 Features

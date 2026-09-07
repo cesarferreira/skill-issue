@@ -11,15 +11,23 @@ struct ApplyPlan {
     create_targets: BTreeSet<PathBuf>,
     create_links: Vec<(PathBuf, PathBuf)>,
     replace_identical: Vec<(PathBuf, PathBuf, PathBuf)>,
+    replace_foreign_links: Vec<(PathBuf, PathBuf, PathBuf)>,
     remove_stale_links: Vec<(PathBuf, PathBuf)>,
     conflicts: Vec<(PathBuf, String)>,
 }
 
-pub(crate) fn run(config: &Config, dry_run: bool) -> Result<u8> {
-    let plan = build_plan(config)?;
+pub(crate) fn run(config: &Config, dry_run: bool, force: bool) -> Result<u8> {
+    let plan = build_plan(config, force)?;
     render_plan(&plan, config);
     if !plan.conflicts.is_empty() {
-        println!("Run: {}", theme::hint("si sync"));
+        if force {
+            println!(
+                "Resolve the conflicts above, then run {}.",
+                theme::hint("si sync --force")
+            );
+        } else {
+            println!("Run: {}", theme::hint("si sync --force"));
+        }
         return Ok(EXIT_ISSUES);
     }
     if dry_run {
@@ -28,6 +36,7 @@ pub(crate) fn run(config: &Config, dry_run: bool) -> Result<u8> {
     }
     if plan.create_links.is_empty()
         && plan.replace_identical.is_empty()
+        && plan.replace_foreign_links.is_empty()
         && plan.remove_stale_links.is_empty()
     {
         println!("{}", theme::dim("Everything is already applied."));
@@ -35,7 +44,8 @@ pub(crate) fn run(config: &Config, dry_run: bool) -> Result<u8> {
     }
     require_confirmation_with_default("Synchronize this plan?", true)?;
     execute_plan(&plan, config)?;
-    let created_link_count = plan.create_links.len() + plan.replace_identical.len();
+    let created_link_count =
+        plan.create_links.len() + plan.replace_identical.len() + plan.replace_foreign_links.len();
     if created_link_count > 0 {
         println!(
             "{} {} link{} created",
@@ -59,11 +69,12 @@ pub(crate) fn run(config: &Config, dry_run: bool) -> Result<u8> {
     Ok(EXIT_OK)
 }
 
-fn build_plan(config: &Config) -> Result<ApplyPlan> {
+fn build_plan(config: &Config, force: bool) -> Result<ApplyPlan> {
     let mut plan = ApplyPlan {
         create_targets: BTreeSet::new(),
         create_links: Vec::new(),
         replace_identical: Vec::new(),
+        replace_foreign_links: Vec::new(),
         remove_stale_links: Vec::new(),
         conflicts: Vec::new(),
     };
@@ -79,10 +90,37 @@ fn build_plan(config: &Config) -> Result<ApplyPlan> {
                 Ok(metadata)
                     if metadata.file_type().is_symlink()
                         && verify_link(&link, &canonical).is_ok() => {}
-                Ok(metadata) if metadata.file_type().is_symlink() => plan.conflicts.push((
-                    link,
-                    "is a foreign or broken symlink; it was left unchanged".to_string(),
-                )),
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    let raw_target = fs::read_link(&link)?;
+                    let resolved = resolve_link_path(&link, &raw_target);
+                    if force && !resolved.is_dir() {
+                        plan.replace_foreign_links
+                            .push((link, canonical, raw_target));
+                    } else if force {
+                        let foreign = fs::canonicalize(&link)?;
+                        if fingerprint_with_ignores(&foreign, &config.ignore)?
+                            == fingerprint_with_ignores(&canonical, &config.ignore)?
+                        {
+                            plan.replace_foreign_links
+                                .push((link, canonical, raw_target));
+                        } else {
+                            plan.conflicts.push((
+                                link,
+                                format!(
+                                    "points to divergent content; inspect it with `si diff {skill}`"
+                                ),
+                            ));
+                        }
+                    } else {
+                        let kind = if resolved.is_dir() {
+                            "foreign"
+                        } else {
+                            "broken"
+                        };
+                        plan.conflicts
+                            .push((link, format!("is a {kind} symlink; it was left unchanged")));
+                    }
+                }
                 Ok(metadata) if metadata.is_dir() => {
                     if fingerprint_with_ignores(&link, &config.ignore)?
                         == fingerprint_with_ignores(&canonical, &config.ignore)?
@@ -156,6 +194,15 @@ fn render_plan(plan: &ApplyPlan, config: &Config) {
             theme::path(&managed_link_value(canonical, link, config.relative_links))
         );
     }
+    for (link, canonical, _) in &plan.replace_foreign_links {
+        println!(
+            "{}\n  {}\n    {} {}",
+            theme::action("REPLACE FOREIGN LINK"),
+            theme::path(link),
+            theme::arrow(),
+            theme::path(&managed_link_value(canonical, link, config.relative_links))
+        );
+    }
     for (link, _) in &plan.remove_stale_links {
         println!("{}  {}", theme::action("UNLINK STALE"), theme::path(link));
     }
@@ -169,6 +216,7 @@ fn execute_plan(plan: &ApplyPlan, config: &Config) -> Result<()> {
     let mut created_links = Vec::new();
     let mut removed_links = Vec::new();
     let mut replaced_links = Vec::new();
+    let mut replaced_foreign_links = Vec::new();
     let result = (|| -> Result<()> {
         for target in &plan.create_targets {
             fs::create_dir_all(target)?;
@@ -188,6 +236,17 @@ fn execute_plan(plan: &ApplyPlan, config: &Config) -> Result<()> {
             }
             replaced_links.push((link.clone(), backup.clone()));
         }
+        for (link, canonical, old_target) in &plan.replace_foreign_links {
+            fs::remove_file(link)?;
+            if let Err(error) = create_managed_symlink(canonical, link, config.relative_links)
+                .and_then(|_| verify_link(link, canonical))
+            {
+                let _ = fs::remove_file(link);
+                let _ = crate::create_symlink(old_target, link);
+                return Err(error);
+            }
+            replaced_foreign_links.push((link.clone(), old_target.clone()));
+        }
         for (link, canonical) in &plan.create_links {
             create_managed_symlink(canonical, link, config.relative_links)?;
             verify_link(link, canonical)?;
@@ -202,6 +261,10 @@ fn execute_plan(plan: &ApplyPlan, config: &Config) -> Result<()> {
         for (link, backup) in replaced_links.iter().rev() {
             let _ = fs::remove_file(link);
             let _ = fs::rename(backup, link);
+        }
+        for (link, old_target) in replaced_foreign_links.iter().rev() {
+            let _ = fs::remove_file(link);
+            let _ = crate::create_symlink(old_target, link);
         }
         for (link, raw_target) in removed_links.iter().rev() {
             let _ = crate::create_symlink(raw_target, link);

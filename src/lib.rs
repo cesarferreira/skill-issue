@@ -122,7 +122,7 @@ pub fn run(cli: Cli) -> Result<u8> {
             }
             match command {
                 Command::Tui { project } => tui::run(config, project, cli.dry_run, cli.no_color),
-                Command::Sync => sync_command(&config, cli.dry_run),
+                Command::Sync { force } => sync_command(&config, cli.dry_run, force),
                 Command::Status => status_command(&config, true),
                 Command::Diff { skill, content } => diff_command(&config, &skill, content),
                 Command::Targets { command } => targets_command(config, command, cli.dry_run),
@@ -423,13 +423,13 @@ fn setup_command(
     Ok(EXIT_OK)
 }
 
-fn sync_command(config: &Config, dry_run: bool) -> Result<u8> {
+fn sync_command(config: &Config, dry_run: bool, force: bool) -> Result<u8> {
     let result = scan(config)?;
     adopt_from_scan(config, &result, None, dry_run, true)?;
     if dry_run {
-        return Ok(EXIT_OK);
+        return apply::run(config, true, force);
     }
-    apply::run(config, false)?;
+    apply::run(config, false, force)?;
     Ok(result_exit(&scan(config)?))
 }
 
@@ -1377,11 +1377,7 @@ fn adopt_from_scan(
         .values()
         .filter(|g| skill.is_none_or(|name| g.name == name))
         .collect();
-    if !tty
-        && selected
-            .iter()
-            .any(|g| g.status() == SkillStatus::Divergent)
-    {
+    if !tty && selected.iter().any(|g| has_divergent_physical_copies(g)) {
         bail!("divergent skills require an interactive terminal; no files were changed");
     }
     if !tty && !ASSUME_YES.load(Ordering::Relaxed) && !dry_run {
@@ -1404,7 +1400,7 @@ fn adopt_from_scan(
         }
         print_adoption_group(group);
         if tty
-            && group.status() != SkillStatus::Divergent
+            && !has_divergent_physical_copies(group)
             && !ASSUME_YES.load(Ordering::Relaxed)
             && !Confirm::with_theme(&ColorfulTheme::default())
                 .with_prompt("Adopt?")
@@ -1440,7 +1436,7 @@ fn adopt_from_scan(
             continue;
         }
         if tty
-            && group.status() == SkillStatus::Divergent
+            && has_divergent_physical_copies(group)
             && !ASSUME_YES.load(Ordering::Relaxed)
             && !Confirm::with_theme(&ColorfulTheme::default())
                 .with_prompt("Use this resolution?")
@@ -1519,6 +1515,19 @@ fn adopt_from_scan(
     Ok(result_exit(&after))
 }
 
+fn has_divergent_physical_copies(group: &SkillGroup) -> bool {
+    let mut fingerprints: BTreeSet<&str> = group
+        .installations
+        .iter()
+        .filter(|installation| installation.kind == InstallationKind::Physical)
+        .filter_map(|installation| installation.fingerprint.as_deref())
+        .collect();
+    if let Some(canonical) = &group.canonical {
+        fingerprints.insert(&canonical.fingerprint);
+    }
+    fingerprints.len() > 1
+}
+
 fn add_missing_target_links(
     config: &Config,
     group: &SkillGroup,
@@ -1591,7 +1600,7 @@ fn plans_for_group(config: &Config, group: &SkillGroup, tty: bool) -> Result<Vec
             .get(&canonical.fingerprint)
             .cloned()
             .unwrap_or_default();
-        if group.status() != SkillStatus::Divergent {
+        if !has_divergent_physical_copies(group) {
             return Ok(plan_existing(
                 &group.name,
                 canonical,

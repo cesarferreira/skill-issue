@@ -121,6 +121,9 @@ preview and confirmation flows.
 - Different physical copies require a user decision; non-interactive conflicts
   fail without mutation.
 - A foreign symlink is preserved and reported.
+- With `si sync --force`, a foreign symlink may be replaced when its contents
+  match the canonical skill; a broken symlink may also be repaired. The prior
+  link target is never deleted, and divergent foreign content is refused.
 - A physical directory is replaced only when its fingerprint equals the
   canonical skill’s fingerprint.
 - A stale managed link may be removed only when it clearly points directly into
@@ -175,6 +178,10 @@ corresponding links and removes only stale managed links.
 
 Given divergent physical content or a foreign symlink, `si sync` leaves it
 unchanged and exits with an actionable issue report.
+
+Given a matching foreign symlink or a broken symlink, `si sync --force`
+replaces only the link with a managed canonical link and leaves the prior
+target untouched. Divergent foreign content remains unchanged.
 
 When every enabled agent points to canonical skills, `si status` ends with:
 

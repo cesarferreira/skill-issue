@@ -113,6 +113,128 @@ fn sync_reconciles_links_and_stale_managed_links() {
 
 #[cfg(unix)]
 #[test]
+fn sync_force_replaces_matching_foreign_symlink_without_removing_its_target() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("root");
+    let target = temp.path().join("target");
+    let foreign = temp.path().join("foreign/foo");
+    skill(&root.join("foo"), "same");
+    skill(&foreign, "same");
+    fs::create_dir_all(&target).unwrap();
+    std::os::unix::fs::symlink(&foreign, target.join("foo")).unwrap();
+    let config = temp.path().join("config.toml");
+    write_config(&config, &root, &[("agent", &target)]);
+
+    cargo_bin_cmd!("si")
+        .env("SKILL_ISSUE_CONFIG", &config)
+        .args(["sync", "--force", "--yes", "--no-color"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("REPLACE FOREIGN LINK"));
+
+    assert_eq!(fs::read_link(target.join("foo")).unwrap(), root.join("foo"));
+    assert_eq!(
+        fs::read_to_string(foreign.join("SKILL.md")).unwrap(),
+        "same"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn sync_without_force_preserves_foreign_symlink_and_suggests_force() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("root");
+    let target = temp.path().join("target");
+    let foreign = temp.path().join("foreign/foo");
+    skill(&root.join("foo"), "same");
+    skill(&foreign, "same");
+    fs::create_dir_all(&target).unwrap();
+    std::os::unix::fs::symlink(&foreign, target.join("foo")).unwrap();
+    let config = temp.path().join("config.toml");
+    write_config(&config, &root, &[("agent", &target)]);
+
+    cargo_bin_cmd!("si")
+        .env("SKILL_ISSUE_CONFIG", &config)
+        .args(["sync", "--yes", "--no-color"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("Run: si sync --force"));
+
+    assert_eq!(fs::read_link(target.join("foo")).unwrap(), foreign);
+}
+
+#[cfg(unix)]
+#[test]
+fn sync_force_repairs_broken_symlink() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("root");
+    let target = temp.path().join("target");
+    skill(&root.join("foo"), "canonical");
+    fs::create_dir_all(&target).unwrap();
+    std::os::unix::fs::symlink(temp.path().join("missing"), target.join("foo")).unwrap();
+    let config = temp.path().join("config.toml");
+    write_config(&config, &root, &[("agent", &target)]);
+
+    cargo_bin_cmd!("si")
+        .env("SKILL_ISSUE_CONFIG", &config)
+        .args(["sync", "--force", "--yes", "--no-color"])
+        .assert()
+        .success();
+
+    assert_eq!(fs::read_link(target.join("foo")).unwrap(), root.join("foo"));
+}
+
+#[cfg(unix)]
+#[test]
+fn sync_force_refuses_divergent_foreign_symlink() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("root");
+    let target = temp.path().join("target");
+    let foreign = temp.path().join("foreign/foo");
+    skill(&root.join("foo"), "canonical");
+    skill(&foreign, "different");
+    fs::create_dir_all(&target).unwrap();
+    std::os::unix::fs::symlink(&foreign, target.join("foo")).unwrap();
+    let config = temp.path().join("config.toml");
+    write_config(&config, &root, &[("agent", &target)]);
+
+    cargo_bin_cmd!("si")
+        .env("SKILL_ISSUE_CONFIG", &config)
+        .args(["sync", "--force", "--yes", "--no-color"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("si diff foo"));
+
+    assert_eq!(fs::read_link(target.join("foo")).unwrap(), foreign);
+}
+
+#[cfg(unix)]
+#[test]
+fn sync_force_dry_run_does_not_replace_foreign_symlink() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("root");
+    let target = temp.path().join("target");
+    let foreign = temp.path().join("foreign/foo");
+    skill(&root.join("foo"), "same");
+    skill(&foreign, "same");
+    fs::create_dir_all(&target).unwrap();
+    std::os::unix::fs::symlink(&foreign, target.join("foo")).unwrap();
+    let config = temp.path().join("config.toml");
+    write_config(&config, &root, &[("agent", &target)]);
+
+    cargo_bin_cmd!("si")
+        .env("SKILL_ISSUE_CONFIG", &config)
+        .args(["sync", "--force", "--dry-run", "--no-color"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("REPLACE FOREIGN LINK"))
+        .stdout(predicate::str::contains("Dry run; no files changed."));
+
+    assert_eq!(fs::read_link(target.join("foo")).unwrap(), foreign);
+}
+
+#[cfg(unix)]
+#[test]
 fn sync_preserves_divergent_physical_content() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("root");
