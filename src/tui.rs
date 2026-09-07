@@ -5,7 +5,10 @@ use super::{
 };
 use anyhow::{Result, bail};
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+    event::{
+        self, DisableFocusChange, EnableFocusChange, Event, KeyCode, KeyEvent, KeyEventKind,
+        KeyModifiers,
+    },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -56,7 +59,7 @@ pub(super) fn run(
 fn run_terminal(mut app: App) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    if let Err(error) = execute!(stdout, EnterAlternateScreen) {
+    if let Err(error) = execute!(stdout, EnterAlternateScreen, EnableFocusChange) {
         let _ = disable_raw_mode();
         return Err(error.into());
     }
@@ -74,7 +77,7 @@ struct RestoreTerminal;
 impl Drop for RestoreTerminal {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen);
+        let _ = execute!(io::stdout(), DisableFocusChange, LeaveAlternateScreen);
     }
 }
 
@@ -125,6 +128,7 @@ struct App {
     no_color: bool,
     should_quit: bool,
     last_refresh: Instant,
+    focused: bool,
 }
 
 impl App {
@@ -151,21 +155,34 @@ impl App {
             no_color,
             should_quit: false,
             last_refresh: Instant::now(),
+            focused: true,
         })
     }
 
     fn event_loop<B: Backend>(&mut self, terminal: &mut Terminal<B>) -> Result<()> {
         while !self.should_quit {
             terminal.draw(|frame| self.draw(frame))?;
-            let elapsed = self.last_refresh.elapsed();
-            let timeout = LIVE_REFRESH_INTERVAL.saturating_sub(elapsed);
-            if event::poll(timeout)?
-                && let Event::Key(key) = event::read()?
-                && key.kind == KeyEventKind::Press
-            {
-                self.handle_key(key)?;
+            let timeout = if self.focused {
+                LIVE_REFRESH_INTERVAL.saturating_sub(self.last_refresh.elapsed())
+            } else {
+                // Unfocused: no live refresh to race against, so block until the
+                // next input/focus event instead of waking up every second.
+                Duration::from_secs(3600)
+            };
+            if event::poll(timeout)? {
+                match event::read()? {
+                    Event::Key(key) if key.kind == KeyEventKind::Press => {
+                        self.handle_key(key)?;
+                    }
+                    Event::FocusGained => {
+                        self.focused = true;
+                        self.live_refresh();
+                    }
+                    Event::FocusLost => self.focused = false,
+                    _ => {}
+                }
             }
-            if self.last_refresh.elapsed() >= LIVE_REFRESH_INTERVAL {
+            if self.focused && self.last_refresh.elapsed() >= LIVE_REFRESH_INTERVAL {
                 self.live_refresh();
             }
         }
