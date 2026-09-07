@@ -71,6 +71,7 @@ enum CanonicalTransfer {
     Existing,
     Move { source: PathBuf },
     Copy { source: PathBuf, temporary: PathBuf },
+    Replace { source: PathBuf, backup: PathBuf },
 }
 
 #[derive(Clone, Debug)]
@@ -1709,16 +1710,38 @@ fn plans_for_group(config: &Config, group: &SkillGroup, tty: bool) -> Result<Vec
         if !tty {
             bail!("{} has divergent copies", group.name);
         }
-        let options = [
-            "Use the existing canonical version where copies match",
-            "Keep all physical versions under separate names",
-            "View diff",
-            "Skip",
-        ];
+        let promotable: Vec<_> = physical_by_fp
+            .iter()
+            .filter(|(fingerprint, _)| *fingerprint != &canonical.fingerprint)
+            .collect();
+        let mut options = vec!["Use the existing canonical version where copies match".to_string()];
+        options.extend(promotable.iter().map(|(fingerprint, paths)| {
+            let targets = paths
+                .iter()
+                .filter_map(|path| {
+                    group
+                        .installations
+                        .iter()
+                        .find(|installation| installation.path == **path)
+                        .map(|installation| target_label(&installation.target))
+                })
+                .collect::<Vec<_>>()
+                .join(" / ");
+            format!(
+                "Promote {targets} ({}) to canonical and archive the current canonical version",
+                short_hash(fingerprint)
+            )
+        }));
+        let keep_both = options.len();
+        options.push("Keep all physical versions under separate names".to_string());
+        let view_diff = options.len();
+        options.push("View diff".to_string());
+        let skip = options.len();
+        options.push("Skip".to_string());
         match Select::with_theme(&ColorfulTheme::default())
             .with_prompt(format!("{} has divergent copies", group.name))
-            .items(options)
-            .default(3)
+            .items(&options)
+            .default(skip)
             .interact()?
         {
             0 => plan_selected_version(
@@ -1729,8 +1752,15 @@ fn plans_for_group(config: &Config, group: &SkillGroup, tty: bool) -> Result<Vec
                 Some(canonical),
             )
             .map(|plan| vec![plan]),
-            1 => plans_keep_both(config, group, &physical_by_fp, Some(&canonical.fingerprint)),
-            2 => {
+            choice if choice <= promotable.len() => {
+                let (fingerprint, paths) = promotable[choice - 1];
+                plan_promote_version(config, group, fingerprint.clone(), paths.clone())
+                    .map(|plan| vec![plan])
+            }
+            choice if choice == keep_both => {
+                plans_keep_both(config, group, &physical_by_fp, Some(&canonical.fingerprint))
+            }
+            choice if choice == view_diff => {
                 diff_group(group, true, &config.ignore)?;
                 plans_for_group(config, group, tty)
             }
@@ -1793,6 +1823,79 @@ fn plans_for_group(config: &Config, group: &SkillGroup, tty: bool) -> Result<Vec
             Ok(Vec::new())
         }
     }
+}
+
+fn plan_promote_version(
+    config: &Config,
+    group: &SkillGroup,
+    fingerprint: String,
+    installations: Vec<PathBuf>,
+) -> Result<AdoptionPlan> {
+    let archive_root = migration_archive_root()?.join(&group.name);
+    plan_promote_version_at(config, group, fingerprint, installations, archive_root)
+}
+
+fn plan_promote_version_at(
+    config: &Config,
+    group: &SkillGroup,
+    fingerprint: String,
+    installations: Vec<PathBuf>,
+    archive_root: PathBuf,
+) -> Result<AdoptionPlan> {
+    let canonical = group
+        .canonical
+        .as_ref()
+        .ok_or_else(|| anyhow!("cannot promote a version without a canonical skill"))?;
+    let source = installations
+        .first()
+        .cloned()
+        .ok_or_else(|| anyhow!("no physical source to promote for {}", group.name))?;
+    let mut plan = AdoptionPlan {
+        display_name: group.name.clone(),
+        canonical: canonical.path.clone(),
+        fingerprint: fingerprint.clone(),
+        transfer: CanonicalTransfer::Replace {
+            source: source.clone(),
+            backup: unique_sibling(&canonical.path, "backup"),
+        },
+        replacements: installations
+            .into_iter()
+            .map(|original| Replacement {
+                backup: (original != source).then(|| unique_sibling(&original, "backup")),
+                original,
+            })
+            .collect(),
+        preserved: vec![PreservedCopy {
+            source: canonical.path.clone(),
+            destination: archive_root.join("canonical"),
+            fingerprint: canonical.fingerprint.clone(),
+            target: "canonical".to_string(),
+        }],
+        ignore: config.ignore.clone(),
+        relative_links: config.relative_links,
+    };
+    for installation in group.installations.iter().filter(|installation| {
+        installation.kind == InstallationKind::Physical
+            && installation.fingerprint.as_deref() != Some(fingerprint.as_str())
+    }) {
+        let rejected_fingerprint = installation.fingerprint.clone().ok_or_else(|| {
+            anyhow!(
+                "cannot preserve unreadable copy at {}",
+                installation.path.display()
+            )
+        })?;
+        plan.preserved.push(PreservedCopy {
+            source: installation.path.clone(),
+            destination: archive_root.join(&installation.target),
+            fingerprint: rejected_fingerprint,
+            target: installation.target.clone(),
+        });
+        plan.replacements.push(Replacement {
+            original: installation.path.clone(),
+            backup: Some(unique_sibling(&installation.path, "backup")),
+        });
+    }
+    Ok(plan)
 }
 
 fn physical_versions(group: &SkillGroup) -> BTreeMap<String, Vec<PathBuf>> {
@@ -2091,6 +2194,9 @@ fn render_adoption_summary(plans: &[AdoptionPlan]) {
             CanonicalTransfer::Existing => {}
             CanonicalTransfer::Move { source } => transfer("MOVING", source, &plan.canonical),
             CanonicalTransfer::Copy { source, .. } => transfer("COPYING", source, &plan.canonical),
+            CanonicalTransfer::Replace { source, .. } => {
+                transfer("PROMOTING", source, &plan.canonical)
+            }
         }
         println!("{}", theme::heading("LINKING"));
         for replacement in &plan.replacements {
@@ -2132,6 +2238,10 @@ fn render_adoption_plans(plans: &[AdoptionPlan]) {
                 step("COPY", source, temporary);
                 println!("{}  {}", theme::action("VERIFY"), theme::path(temporary));
                 step("MOVE", temporary, &plan.canonical);
+            }
+            CanonicalTransfer::Replace { source, backup } => {
+                step("STAGE", &plan.canonical, backup);
+                step("PROMOTE", source, &plan.canonical);
             }
         }
         println!(
@@ -2231,9 +2341,36 @@ fn execute_adoption(plan: &AdoptionPlan) -> Result<()> {
             }
             None
         }
+        CanonicalTransfer::Replace { source, backup } => {
+            fs::rename(&plan.canonical, backup).with_context(|| {
+                format!(
+                    "stage canonical {} at {}",
+                    plan.canonical.display(),
+                    backup.display()
+                )
+            })?;
+            if let Err(error) = fs::rename(source, &plan.canonical) {
+                let _ = fs::rename(backup, &plan.canonical);
+                return Err(error).with_context(|| {
+                    format!(
+                        "promote {} to {}",
+                        source.display(),
+                        plan.canonical.display()
+                    )
+                });
+            }
+            Some(source.clone())
+        }
+    };
+    let replaced_canonical = match &plan.transfer {
+        CanonicalTransfer::Replace { source, backup } => Some((source, backup)),
+        _ => None,
     };
     if fingerprint_with_ignores(&plan.canonical, &plan.ignore)? != plan.fingerprint {
-        if let Some(source) = &moved_source {
+        if let Some((source, backup)) = replaced_canonical {
+            let _ = fs::rename(&plan.canonical, source);
+            let _ = fs::rename(backup, &plan.canonical);
+        } else if let Some(source) = &moved_source {
             let _ = fs::rename(&plan.canonical, source);
         } else if created_canonical {
             let _ = fs::remove_dir_all(&plan.canonical);
@@ -2270,7 +2407,10 @@ fn execute_adoption(plan: &AdoptionPlan) -> Result<()> {
         for (original, backup) in staged.iter().rev() {
             let _ = fs::rename(backup, original);
         }
-        if let Some(source) = &moved_source {
+        if let Some((source, backup)) = replaced_canonical {
+            let _ = fs::rename(&plan.canonical, source);
+            let _ = fs::rename(backup, &plan.canonical);
+        } else if let Some(source) = &moved_source {
             let _ = fs::rename(&plan.canonical, source);
         } else if created_canonical {
             let _ = fs::remove_dir_all(&plan.canonical);
@@ -2284,6 +2424,14 @@ fn execute_adoption(plan: &AdoptionPlan) -> Result<()> {
                 backup.display()
             );
         }
+    }
+    if let Some((_, backup)) = replaced_canonical
+        && let Err(error) = fs::remove_dir_all(backup)
+    {
+        eprintln!(
+            "Warning: could not remove recovery copy {}: {error}",
+            backup.display()
+        );
     }
     for preserved in &plan.preserved {
         println!(
@@ -4077,6 +4225,48 @@ mod tests {
         assert_eq!(fs::read_link(&codex).unwrap(), config.root.join("android"));
         assert_eq!(
             scan(&config).unwrap().groups["android"].status(),
+            SkillStatus::Managed
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn promoting_an_installed_version_archives_the_old_canonical_and_relinks_every_target() {
+        let (temp, config) = fixture();
+        let canonical = config.root.join("stax");
+        let claude = config.targets["claude"].path.join("stax");
+        let codex = config.targets["codex"].path.join("stax");
+        skill(&canonical, "old canonical");
+        skill(&claude, "new version");
+        skill(&codex, "new version");
+        let result = scan(&config).unwrap();
+        let group = &result.groups["stax"];
+        let selected = fingerprint(&claude).unwrap();
+        let archive = temp.path().join("archive/stax");
+        let plan = plan_promote_version_at(
+            &config,
+            group,
+            selected,
+            vec![claude.clone(), codex.clone()],
+            archive.clone(),
+        )
+        .unwrap();
+
+        execute_adoption(&plan).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(canonical.join("SKILL.md")).unwrap(),
+            "new version"
+        );
+        assert_eq!(
+            fs::read_to_string(archive.join("canonical/SKILL.md")).unwrap(),
+            "old canonical"
+        );
+        assert!(archive.join("canonical.manifest.json").is_file());
+        assert_eq!(fs::read_link(&claude).unwrap(), canonical);
+        assert_eq!(fs::read_link(&codex).unwrap(), canonical);
+        assert_eq!(
+            scan(&config).unwrap().groups["stax"].status(),
             SkillStatus::Managed
         );
     }
