@@ -6,6 +6,31 @@ agent. Put that directory in Git and every computer uses the same skills.
 
 Your agents have a skill issue. Fortunately, it is mostly symlinks.
 
+```mermaid
+flowchart LR
+    remote[(Git remote)] <-->|git pull / push| root["Canonical skills<br/><code>~/code/skills</code><br/>real directories"]
+
+    sync{{"si sync"}} -->|collects new physical skills| root
+    sync -->|creates and reconciles links| agents
+
+    subgraph agents["Agent skill directories"]
+        direction TB
+        claude["Claude Code<br/><code>~/.claude/skills</code>"]
+        codex["Codex<br/><code>~/.codex/skills</code>"]
+        generic["Shared agents<br/><code>~/.agents/skills</code>"]
+        others["Other configured agents"]
+    end
+
+    claude -. symlink .-> root
+    codex -. symlink .-> root
+    generic -. symlink .-> root
+    others -. symlink .-> root
+```
+
+Git moves the real skill directories between computers. `si sync` handles only
+the local layout: one canonical copy of each skill, with every configured agent
+pointing back to it.
+
 ## First computer
 
 `setup` configures the canonical directory and detects installed agents. `sync`
