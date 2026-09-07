@@ -2,13 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
-
-### 🚀 Features
-
-- Add `si sync --force` to safely take over matching foreign and broken links
-
-## [0.3.0] - 2026-09-06
+## [0.4.0] - 2026-09-07
 
 ### 🚀 Features
 
@@ -34,6 +28,8 @@ All notable changes to this project will be documented in this file.
 - Add an interactive skill dashboard and sync workflow ([#2](https://github.com/cesarferreira/skill-issue/issues/2))
 - Mvp
 - Removed superpowers
+- Force
+- Updated readme
 
 ### 🚜 Refactor
 
