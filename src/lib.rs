@@ -472,7 +472,7 @@ pub(crate) fn plan_tui_sync(config: &Config) -> Result<TuiSyncPlan> {
     let result = scan(config)?;
     let mut adoptions = Vec::new();
     for group in result.groups.values() {
-        if matches!(group.status(), SkillStatus::Managed | SkillStatus::Broken) {
+        if group.status() == SkillStatus::Managed {
             continue;
         }
         if has_divergent_physical_copies(group) {
@@ -1684,7 +1684,7 @@ fn print_adoption_group(group: &SkillGroup) {
 }
 
 fn plans_for_group(config: &Config, group: &SkillGroup, tty: bool) -> Result<Vec<AdoptionPlan>> {
-    if matches!(group.status(), SkillStatus::Managed | SkillStatus::Broken) {
+    if group.status() == SkillStatus::Managed {
         return Ok(Vec::new());
     }
     let physical_by_fp = physical_versions(group);
@@ -4268,6 +4268,28 @@ mod tests {
         assert_eq!(
             scan(&config).unwrap().groups["stax"].status(),
             SkillStatus::Managed
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn broken_link_does_not_hide_a_divergent_physical_version_from_resolution() {
+        let (temp, config) = fixture();
+        let canonical = config.root.join("stax");
+        let claude = config.targets["claude"].path.join("stax");
+        let codex = config.targets["codex"].path.join("stax");
+        skill(&canonical, "old canonical");
+        skill(&claude, "new version");
+        std::os::unix::fs::symlink(temp.path().join("missing"), &codex).unwrap();
+
+        let result = scan(&config).unwrap();
+        let group = &result.groups["stax"];
+        assert_eq!(group.status(), SkillStatus::Broken);
+        assert!(
+            plans_for_group(&config, group, false)
+                .unwrap_err()
+                .to_string()
+                .contains("stax has divergent copies")
         );
     }
 
