@@ -2,18 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.5.0] - 2026-09-07
-
-### 🐛 Bug Fixes
-
-- Fix tui
-
-### 💼 Other
-
-- Added sync to the TUI
-- Tui fix
-- Added test coverage
-## [0.4.0] - 2026-09-07
+## [0.5.1] - 2026-09-07
 
 ### 🚀 Features
 
@@ -32,6 +21,7 @@ All notable changes to this project will be documented in this file.
 - Name canonical root in Git warning
 - Abbreviate home paths in CLI output
 - Preview first setup migration
+- Fix tui
 
 ### 💼 Other
 
@@ -41,6 +31,10 @@ All notable changes to this project will be documented in this file.
 - Removed superpowers
 - Force
 - Updated readme
+- Added sync to the TUI
+- Tui fix
+- Added test coverage
+- Refresh on focus
 
 ### 🚜 Refactor
 
