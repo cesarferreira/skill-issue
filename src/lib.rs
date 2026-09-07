@@ -472,7 +472,7 @@ pub(crate) fn plan_tui_sync(config: &Config) -> Result<TuiSyncPlan> {
     let result = scan(config)?;
     let mut adoptions = Vec::new();
     for group in result.groups.values() {
-        if group.status() == SkillStatus::Managed {
+        if !needs_adoption(group) {
             continue;
         }
         if has_divergent_physical_copies(group) {
@@ -1491,7 +1491,7 @@ fn adopt_from_scan(
     };
     let mut planned_any = false;
     for group in selected {
-        if matches!(group.status(), SkillStatus::Managed | SkillStatus::Broken) {
+        if !needs_adoption(group) {
             continue;
         }
         print_adoption_group(group);
@@ -1624,6 +1624,10 @@ fn has_divergent_physical_copies(group: &SkillGroup) -> bool {
     fingerprints.len() > 1
 }
 
+fn needs_adoption(group: &SkillGroup) -> bool {
+    group.status() != SkillStatus::Managed
+}
+
 fn add_missing_target_links(
     config: &Config,
     group: &SkillGroup,
@@ -1684,7 +1688,7 @@ fn print_adoption_group(group: &SkillGroup) {
 }
 
 fn plans_for_group(config: &Config, group: &SkillGroup, tty: bool) -> Result<Vec<AdoptionPlan>> {
-    if group.status() == SkillStatus::Managed {
+    if !needs_adoption(group) {
         return Ok(Vec::new());
     }
     let physical_by_fp = physical_versions(group);
@@ -4285,6 +4289,7 @@ mod tests {
         let result = scan(&config).unwrap();
         let group = &result.groups["stax"];
         assert_eq!(group.status(), SkillStatus::Broken);
+        assert!(needs_adoption(group));
         assert!(
             plans_for_group(&config, group, false)
                 .unwrap_err()
