@@ -1,6 +1,7 @@
 use super::{
     Config, InstallationKind, ScanResult, SkillDeletePlan, SkillGroup, SkillStatus,
-    SkillTogglePlan, config_with_project, plan_skill_delete, plan_skill_toggle, scan,
+    SkillTogglePlan, TuiSyncPlan, config_with_project, plan_skill_delete, plan_skill_toggle,
+    plan_tui_sync, scan,
 };
 use anyhow::{Result, bail};
 use crossterm::{
@@ -22,7 +23,10 @@ use ratatui::{
 use std::{
     io::{self, IsTerminal},
     path::PathBuf,
+    time::{Duration, Instant},
 };
+
+const LIVE_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 
 const BRAND: Color = Color::Rgb(125, 211, 252);
 const ACCENT: Color = Color::Rgb(167, 139, 250);
@@ -104,6 +108,7 @@ enum Mode {
     Help,
     Confirm(SkillTogglePlan),
     ConfirmDelete(SkillDeletePlan),
+    ConfirmSync(TuiSyncPlan),
     Notice,
 }
 
@@ -119,6 +124,7 @@ struct App {
     dry_run: bool,
     no_color: bool,
     should_quit: bool,
+    last_refresh: Instant,
 }
 
 impl App {
@@ -144,17 +150,23 @@ impl App {
             dry_run,
             no_color,
             should_quit: false,
+            last_refresh: Instant::now(),
         })
     }
 
     fn event_loop<B: Backend>(&mut self, terminal: &mut Terminal<B>) -> Result<()> {
         while !self.should_quit {
             terminal.draw(|frame| self.draw(frame))?;
-            let Event::Key(key) = event::read()? else {
-                continue;
-            };
-            if key.kind == KeyEventKind::Press {
+            let elapsed = self.last_refresh.elapsed();
+            let timeout = LIVE_REFRESH_INTERVAL.saturating_sub(elapsed);
+            if event::poll(timeout)?
+                && let Event::Key(key) = event::read()?
+                && key.kind == KeyEventKind::Press
+            {
                 self.handle_key(key)?;
+            }
+            if self.last_refresh.elapsed() >= LIVE_REFRESH_INTERVAL {
+                self.live_refresh();
             }
         }
         Ok(())
@@ -173,6 +185,9 @@ impl App {
             Mode::ConfirmDelete(_) => {
                 return self.handle_delete_confirmation(key);
             }
+            Mode::ConfirmSync(_) => {
+                return self.handle_sync_confirmation(key);
+            }
             Mode::Browse => {}
         }
 
@@ -186,6 +201,7 @@ impl App {
             KeyCode::Char('?') => self.mode = Mode::Help,
             KeyCode::Char('/') if self.view == View::Skills => self.mode = Mode::Filter,
             KeyCode::Char('r') => self.refresh()?,
+            KeyCode::Char('s') => self.prepare_sync()?,
             KeyCode::Char('d') if self.view == View::Skills => self.prepare_toggle()?,
             KeyCode::Char('x' | 'D') if self.view == View::Skills => self.prepare_delete()?,
             KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
@@ -285,6 +301,64 @@ impl App {
     fn refresh(&mut self) -> Result<()> {
         self.result = scan(&self.config)?;
         self.normalize_skill_selection();
+        self.last_refresh = Instant::now();
+        Ok(())
+    }
+
+    fn live_refresh(&mut self) {
+        if let Ok(result) = scan(&self.config) {
+            self.result = result;
+            self.normalize_skill_selection();
+        }
+        self.last_refresh = Instant::now();
+    }
+
+    fn prepare_sync(&mut self) -> Result<()> {
+        match plan_tui_sync(&self.config) {
+            Ok(plan) if !plan.conflicts().is_empty() => {
+                let (path, reason) = &plan.conflicts()[0];
+                self.notice = format!("Cannot sync: {} {reason}", super::theme::display_path(path));
+                self.mode = Mode::Notice;
+            }
+            Ok(plan) if plan.is_empty() => {
+                self.notice = "Everything is already synchronized.".to_string();
+                self.mode = Mode::Notice;
+            }
+            Ok(plan) => self.mode = Mode::ConfirmSync(plan),
+            Err(error) => {
+                self.notice = format!("Cannot sync: {error:#}");
+                self.mode = Mode::Notice;
+            }
+        }
+        Ok(())
+    }
+
+    fn handle_sync_confirmation(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Enter => {
+                let Mode::ConfirmSync(plan) = std::mem::replace(&mut self.mode, Mode::Browse)
+                else {
+                    return Ok(());
+                };
+                let actions = plan.action_count();
+                if self.dry_run {
+                    self.notice = format!(
+                        "Dry run: sync would perform {actions} filesystem action{}.",
+                        if actions == 1 { "" } else { "s" }
+                    );
+                } else {
+                    let actions = plan.apply(&self.config)?;
+                    self.refresh()?;
+                    self.notice = format!(
+                        "Sync complete: {actions} filesystem action{} applied.",
+                        if actions == 1 { "" } else { "s" }
+                    );
+                }
+                self.mode = Mode::Notice;
+            }
+            KeyCode::Char('n') | KeyCode::Esc => self.mode = Mode::Browse,
+            _ => {}
+        }
         Ok(())
     }
 
@@ -446,19 +520,18 @@ impl App {
     }
 
     fn draw_header(&self, frame: &mut Frame, area: Rect) {
-        let managed = self
-            .result
-            .groups
-            .values()
-            .filter(|group| group.status() == SkillStatus::Managed)
-            .count();
+        let count = |status| {
+            self.result
+                .groups
+                .values()
+                .filter(|group| group.status() == status)
+                .count()
+        };
+        let managed = count(SkillStatus::Managed);
         let total = self.result.groups.len();
-        let conflicts = self
-            .result
-            .groups
-            .values()
-            .filter(|group| group.status() == SkillStatus::Divergent)
-            .count();
+        let conflicts = count(SkillStatus::Divergent);
+        let broken = count(SkillStatus::Broken);
+        let pending = count(SkillStatus::Unique) + count(SkillStatus::IdenticalDuplicate);
         let title = Line::from(vec![
             Span::styled(" ◆ ", self.style(BRAND).add_modifier(Modifier::BOLD)),
             Span::styled(
@@ -479,6 +552,15 @@ impl App {
                 self.pill(BRAND),
             ),
         ]);
+        let summary = Line::from(vec![
+            Span::styled(format!(" {managed} managed "), self.pill(GOOD)),
+            Span::raw(" "),
+            Span::styled(format!(" {broken} broken "), self.pill(WARN)),
+            Span::raw(" "),
+            Span::styled(format!(" {conflicts} conflicts "), self.pill(BAD)),
+            Span::raw(" "),
+            Span::styled(format!(" {pending} pending "), self.pill(ACCENT)),
+        ]);
         let tabs = Tabs::new(["SKILLS", "AGENTS", "HEALTH"])
             .select(self.view.index())
             .style(self.style(MUTED))
@@ -491,7 +573,9 @@ impl App {
         ])
         .margin(1)
         .split(area);
-        frame.render_widget(title, rows[0]);
+        let top = Layout::horizontal([Constraint::Min(24), Constraint::Length(55)]).split(rows[0]);
+        frame.render_widget(title, top[0]);
+        frame.render_widget(Paragraph::new(summary).alignment(Alignment::Right), top[1]);
         frame.render_widget(metrics, rows[1]);
         frame.render_widget(tabs, rows[2]);
     }
@@ -783,6 +867,8 @@ impl App {
                 Span::styled(" delete  ", self.style(Color::White)),
                 Span::styled(" r ", self.pill(GOOD)),
                 Span::styled(" refresh  ", self.style(Color::White)),
+                Span::styled(" s ", self.pill(ACCENT)),
+                Span::styled(" sync  ", self.style(Color::White)),
                 Span::styled(" ? ", self.pill(MUTED)),
                 Span::styled(" help  ", self.style(Color::White)),
                 Span::styled(" q ", self.pill(BAD)),
@@ -809,6 +895,7 @@ impl App {
                     Line::raw("Tab / ⇧Tab   Change dashboard view"),
                     Line::raw("/            Filter skills"),
                     Line::raw("r            Rescan the filesystem"),
+                    Line::raw("s            Preview and synchronize all skills"),
                     Line::raw(""),
                     Line::styled("ACTIONS", self.style(ACCENT).add_modifier(Modifier::BOLD)),
                     Line::raw("d            Enable or disable the selected skill"),
@@ -823,7 +910,7 @@ impl App {
                     Line::styled("Press any key to close", self.style(MUTED)),
                 ],
                 62,
-                19,
+                20,
             ),
             Mode::Confirm(plan) => {
                 let action = if plan.enable { "ENABLE" } else { "DISABLE" };
@@ -913,6 +1000,41 @@ impl App {
                     self.style(ACCENT),
                 ));
                 (" Confirm delete ", lines, 72, 16)
+            }
+            Mode::ConfirmSync(plan) => {
+                let mut lines = vec![
+                    Line::styled(
+                        "SYNC ALL SKILLS",
+                        self.style(ACCENT).add_modifier(Modifier::BOLD),
+                    ),
+                    Line::raw(""),
+                    Line::raw(format!(
+                        "{} skill{} will be collected; up to {} filesystem action{} planned.",
+                        plan.skill_count(),
+                        if plan.skill_count() == 1 { "" } else { "s" },
+                        plan.action_count(),
+                        if plan.action_count() == 1 { "" } else { "s" },
+                    )),
+                    Line::raw(""),
+                    Line::styled(
+                        if self.dry_run {
+                            "DRY RUN — no files will change"
+                        } else {
+                            "Only unambiguous changes will be applied."
+                        },
+                        self.style(BRAND),
+                    ),
+                    Line::raw(""),
+                    Line::styled("Enter/y confirm  ·  n/Esc cancel", self.style(ACCENT)),
+                ];
+                if plan.skill_count() == 0 {
+                    lines[2] = Line::raw(format!(
+                        "{} reconciliation action{} planned.",
+                        plan.action_count(),
+                        if plan.action_count() == 1 { "" } else { "s" },
+                    ));
+                }
+                (" Confirm sync ", lines, 72, 12)
             }
             Mode::Notice => (
                 " skill-issue ",
@@ -1050,6 +1172,10 @@ mod tests {
         assert!(screen.contains("skill-issue"));
         assert!(screen.contains("rust-cli"));
         assert!(screen.contains("DISABLED"));
+        assert!(screen.contains("1 managed"), "{screen}");
+        assert!(screen.contains("0 broken"));
+        assert!(screen.contains("0 conflicts"));
+        assert!(screen.contains("0 pending"));
 
         app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE))
             .unwrap();
@@ -1096,6 +1222,18 @@ mod tests {
             .unwrap();
         assert!(!destination.exists());
         assert!(app.notice.contains("Dry run"));
+    }
+
+    #[test]
+    fn live_refresh_picks_up_filesystem_changes() {
+        let (_temp, config) = fixture();
+        let mut app = App::new(config.clone(), false, false).unwrap();
+        fs::create_dir_all(config.root.join("new-skill")).unwrap();
+        fs::write(config.root.join("new-skill/SKILL.md"), "new").unwrap();
+
+        app.live_refresh();
+
+        assert!(app.result.groups.contains_key("new-skill"));
     }
 
     #[test]
@@ -1182,5 +1320,23 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE))
             .unwrap();
         assert!(!destination.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn confirmed_sync_reconciles_and_refreshes_the_dashboard() {
+        let (_temp, config) = fixture();
+        let destination = config.targets["claude"].path.join("rust-cli");
+        let mut app = App::new(config, false, false).unwrap();
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))
+            .unwrap();
+        assert!(matches!(app.mode, Mode::ConfirmSync(_)));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+
+        assert!(destination.is_symlink());
+        assert_eq!(app.result.groups["rust-cli"].status(), SkillStatus::Managed);
+        assert!(app.notice.contains("Sync complete"));
     }
 }

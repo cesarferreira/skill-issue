@@ -147,7 +147,9 @@ broken links. It keeps the power-user controls for enabling, disabling, and
 deleting a canonical skill, each with a preview and confirmation.
 
 Use `↑`/`↓` or `j`/`k` to navigate, `Tab` to switch views, `/` to filter,
-`d` to enable or disable, `D` to delete, `r` to rescan, and `?` for help.
+`d` to enable or disable, `D` to delete, `s` to preview and run sync, `r` to
+rescan, and `?` for help. The dashboard also rescans automatically once per
+second, so filesystem changes and sync results appear without a manual refresh.
 
 ## Configuration
 

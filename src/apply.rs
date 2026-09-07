@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use std::{collections::BTreeSet, fs, io, path::PathBuf};
 
 #[derive(Debug)]
-struct ApplyPlan {
+pub(crate) struct ApplyPlan {
     create_targets: BTreeSet<PathBuf>,
     create_links: Vec<(PathBuf, PathBuf)>,
     replace_identical: Vec<(PathBuf, PathBuf, PathBuf)>,
@@ -69,7 +69,7 @@ pub(crate) fn run(config: &Config, dry_run: bool, force: bool) -> Result<u8> {
     Ok(EXIT_OK)
 }
 
-fn build_plan(config: &Config, force: bool) -> Result<ApplyPlan> {
+pub(crate) fn build_plan(config: &Config, force: bool) -> Result<ApplyPlan> {
     let mut plan = ApplyPlan {
         create_targets: BTreeSet::new(),
         create_links: Vec::new(),
@@ -211,7 +211,7 @@ fn render_plan(plan: &ApplyPlan, config: &Config) {
     }
 }
 
-fn execute_plan(plan: &ApplyPlan, config: &Config) -> Result<()> {
+pub(crate) fn execute_plan(plan: &ApplyPlan, config: &Config) -> Result<()> {
     let mut created_targets = Vec::new();
     let mut created_links = Vec::new();
     let mut removed_links = Vec::new();
@@ -278,4 +278,18 @@ fn execute_plan(plan: &ApplyPlan, config: &Config) -> Result<()> {
         fs::remove_dir_all(backup)?;
     }
     Ok(())
+}
+
+impl ApplyPlan {
+    pub(crate) fn action_count(&self) -> usize {
+        self.create_targets.len()
+            + self.create_links.len()
+            + self.replace_identical.len()
+            + self.replace_foreign_links.len()
+            + self.remove_stale_links.len()
+    }
+
+    pub(crate) fn conflicts(&self) -> &[(PathBuf, String)] {
+        &self.conflicts
+    }
 }

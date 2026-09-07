@@ -433,6 +433,88 @@ fn sync_command(config: &Config, dry_run: bool, force: bool) -> Result<u8> {
     Ok(result_exit(&scan(config)?))
 }
 
+pub(crate) struct TuiSyncPlan {
+    adoptions: Vec<AdoptionPlan>,
+    reconciliation: apply::ApplyPlan,
+}
+
+impl TuiSyncPlan {
+    pub(crate) fn skill_count(&self) -> usize {
+        self.adoptions.len()
+    }
+
+    pub(crate) fn action_count(&self) -> usize {
+        self.adoptions
+            .iter()
+            .map(|plan| {
+                plan.replacements.len()
+                    + usize::from(!matches!(plan.transfer, CanonicalTransfer::Existing))
+            })
+            .sum::<usize>()
+            + self.reconciliation.action_count()
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.action_count() == 0
+    }
+
+    pub(crate) fn conflicts(&self) -> &[(PathBuf, String)] {
+        self.reconciliation.conflicts()
+    }
+
+    pub(crate) fn apply(self, config: &Config) -> Result<usize> {
+        if let Some((path, reason)) = self.conflicts().first() {
+            bail!("{} {reason}", display_path(path));
+        }
+        let adoption_actions = self
+            .adoptions
+            .iter()
+            .map(|plan| {
+                plan.replacements.len()
+                    + usize::from(!matches!(plan.transfer, CanonicalTransfer::Existing))
+            })
+            .sum::<usize>();
+        for plan in &self.adoptions {
+            execute_adoption(plan)?;
+        }
+        // Adoption changes the filesystem shape, so rebuild reconciliation from
+        // the new state instead of executing the (preview-only) initial plan.
+        let reconciliation = apply::build_plan(config, false)?;
+        if let Some((path, reason)) = reconciliation.conflicts().first() {
+            bail!("{} {reason}", display_path(path));
+        }
+        let reconciliation_actions = reconciliation.action_count();
+        apply::execute_plan(&reconciliation, config)?;
+        Ok(adoption_actions + reconciliation_actions)
+    }
+}
+
+pub(crate) fn plan_tui_sync(config: &Config) -> Result<TuiSyncPlan> {
+    let result = scan(config)?;
+    let mut adoptions = Vec::new();
+    for group in result.groups.values() {
+        if matches!(group.status(), SkillStatus::Managed | SkillStatus::Broken) {
+            continue;
+        }
+        if has_divergent_physical_copies(group) {
+            bail!(
+                "{} has divergent copies; inspect it with `si diff {}`",
+                group.name,
+                group.name
+            );
+        }
+        let mut plans = plans_for_group(config, group, false)?;
+        if plans.len() == 1 {
+            add_missing_target_links(config, group, &mut plans[0])?;
+        }
+        adoptions.extend(plans);
+    }
+    Ok(TuiSyncPlan {
+        adoptions,
+        reconciliation: apply::build_plan(config, false)?,
+    })
+}
+
 fn merge_setup_inputs(
     mut config: Config,
     target_args: &[String],
