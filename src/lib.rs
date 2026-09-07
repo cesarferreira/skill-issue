@@ -353,6 +353,7 @@ fn initial_setup_config(
             ("opencode", ".config/opencode/skills"),
             ("hermes", ".hermes/skills"),
             ("cursor", ".cursor/skills"),
+            ("pi", ".pi/agent/skills"),
         ] {
             let path = home.join(relative);
             if path.is_dir() {
@@ -1052,6 +1053,7 @@ fn target_label(id: &str) -> String {
         "opencode" => "Opencode".into(),
         "hermes" => "Hermes".into(),
         "cursor" => "Cursor".into(),
+        "pi" => "Pi".into(),
         _ => {
             let mut chars = id.chars();
             chars
@@ -1071,7 +1073,8 @@ fn target_rank(id: &str) -> u8 {
         "opencode" => 4,
         "hermes" => 5,
         "cursor" => 6,
-        _ => 7,
+        "pi" => 7,
+        _ => 8,
     }
 }
 

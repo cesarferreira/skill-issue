@@ -374,6 +374,37 @@ fn setup_discovers_cursor_skills() {
 
 #[cfg(unix)]
 #[test]
+fn setup_discovers_pi_skills() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let root = home.join("skills");
+    let pi = home.join(".pi/agent/skills");
+    skill(&pi.join("pi-only"), "pi skill");
+    let config = temp.path().join("config.toml");
+
+    cargo_bin_cmd!("si")
+        .env("HOME", &home)
+        .env("SKILL_ISSUE_CONFIG", &config)
+        .args(["setup", root.to_str().unwrap(), "--yes", "--no-color"])
+        .assert()
+        .success();
+    assert!(pi.join("pi-only").is_dir());
+    assert!(!root.join("pi-only").exists());
+
+    cargo_bin_cmd!("si")
+        .env("HOME", &home)
+        .env("SKILL_ISSUE_CONFIG", &config)
+        .args(["sync", "--yes", "--no-color"])
+        .assert()
+        .success();
+
+    assert!(root.join("pi-only").is_dir());
+    assert!(pi.join("pi-only").is_symlink());
+    assert!(fs::read_to_string(config).unwrap().contains("[targets.pi]"));
+}
+
+#[cfg(unix)]
+#[test]
 fn first_setup_dry_run_only_previews_configuration() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("home");
