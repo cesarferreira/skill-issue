@@ -1734,11 +1734,21 @@ fn plans_for_group(config: &Config, group: &SkillGroup, tty: bool) -> Result<Vec
                 })
                 .collect::<Vec<_>>()
                 .join(" / ");
-            let changes = directory_diff(&canonical.path, &paths[0], true, &config.ignore)?;
+            let changes = directory_diff(
+                &canonical.path,
+                &paths[0],
+                true,
+                &config.ignore,
+                "canonical",
+                "installed",
+            )?;
             render_text_diff("Canonical", &targets, &changes);
             println!();
         }
-        let mut options = vec!["Use the existing canonical version where copies match".to_string()];
+        let mut options = vec![format!(
+            "Keep current canonical {} (- lines in the diff)",
+            short_hash(&canonical.fingerprint)
+        )];
         options.extend(promotable.iter().map(|(fingerprint, paths)| {
             let targets = paths
                 .iter()
@@ -1752,7 +1762,7 @@ fn plans_for_group(config: &Config, group: &SkillGroup, tty: bool) -> Result<Vec
                 .collect::<Vec<_>>()
                 .join(" / ");
             format!(
-                "Promote {targets} ({}) to canonical and archive the current canonical version",
+                "Promote installed {targets} {} (+ lines in the diff) and archive the current canonical version",
                 short_hash(fingerprint)
             )
         }));
@@ -2931,7 +2941,7 @@ fn diff_group(group: &SkillGroup, content: bool, ignore: &[String]) -> Result<u8
         .unwrap_or(1);
     let left = &copies[first];
     let right = &copies[second];
-    let changes = directory_diff(&left.1, &right.1, content, ignore)?;
+    let changes = directory_diff(&left.1, &right.1, content, ignore, "a", "b")?;
     if JSON_OUTPUT.load(Ordering::Relaxed) {
         println!(
             "{}",
@@ -2961,6 +2971,8 @@ fn directory_diff(
     right: &Path,
     content: bool,
     ignore: &[String],
+    left_label: &str,
+    right_label: &str,
 ) -> Result<Vec<DiffChange>> {
     let left_manifest = directory_manifest(left, ignore)?;
     let right_manifest = directory_manifest(right, ignore)?;
@@ -2988,7 +3000,7 @@ fn directory_diff(
             }
             (Some(a), Some(b)) if a.kind != b.kind || a.hash != b.hash => {
                 let detail = (content && a.kind == b'F' && b.kind == b'F')
-                    .then(|| content_diff(&name, a, b))
+                    .then(|| content_diff(&name, a, b, left_label, right_label))
                     .transpose()?;
                 changes.push(DiffChange {
                     status: 'M',
@@ -3025,7 +3037,13 @@ fn render_text_diff(left: &str, right: &str, changes: &[DiffChange]) {
     }
 }
 
-fn content_diff(name: &str, left: &ManifestEntry, right: &ManifestEntry) -> Result<String> {
+fn content_diff(
+    name: &str,
+    left: &ManifestEntry,
+    right: &ManifestEntry,
+    left_label: &str,
+    right_label: &str,
+) -> Result<String> {
     let left_bytes = fs::read(&left.source)?;
     let right_bytes = fs::read(&right.source)?;
     match (
@@ -3034,7 +3052,10 @@ fn content_diff(name: &str, left: &ManifestEntry, right: &ManifestEntry) -> Resu
     ) {
         (Ok(a), Ok(b)) => Ok(TextDiff::from_lines(a, b)
             .unified_diff()
-            .header(&format!("a/{name}"), &format!("b/{name}"))
+            .header(
+                &format!("{left_label}/{name}"),
+                &format!("{right_label}/{name}"),
+            )
             .to_string()),
         _ => Ok("  (binary content differs)\n".to_string()),
     }
@@ -4283,10 +4304,18 @@ mod tests {
         let group = &result.groups["stax"];
         let selected = fingerprint(&claude).unwrap();
         let archive = temp.path().join("archive/stax");
-        let changes = directory_diff(&canonical, &claude, true, &config.ignore).unwrap();
+        let changes = directory_diff(
+            &canonical,
+            &claude,
+            true,
+            &config.ignore,
+            "canonical",
+            "installed",
+        )
+        .unwrap();
         let patch = changes[0].content.as_deref().unwrap();
-        assert!(patch.contains("--- a/SKILL.md"));
-        assert!(patch.contains("+++ b/SKILL.md"));
+        assert!(patch.contains("--- canonical/SKILL.md"));
+        assert!(patch.contains("+++ installed/SKILL.md"));
         assert!(patch.contains("-old canonical"));
         assert!(patch.contains("+new version"));
         let plan = plan_promote_version_at(
