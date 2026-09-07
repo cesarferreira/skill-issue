@@ -1721,6 +1721,23 @@ fn plans_for_group(config: &Config, group: &SkillGroup, tty: bool) -> Result<Vec
             .iter()
             .filter(|(fingerprint, _)| *fingerprint != &canonical.fingerprint)
             .collect();
+        println!("\n{}", theme::heading("CHANGES FROM CANONICAL"));
+        for (_, paths) in &promotable {
+            let targets = paths
+                .iter()
+                .filter_map(|path| {
+                    group
+                        .installations
+                        .iter()
+                        .find(|installation| installation.path == *path)
+                        .map(|installation| target_label(&installation.target))
+                })
+                .collect::<Vec<_>>()
+                .join(" / ");
+            let changes = directory_diff(&canonical.path, &paths[0], true, &config.ignore)?;
+            render_text_diff("Canonical", &targets, &changes);
+            println!();
+        }
         let mut options = vec!["Use the existing canonical version where copies match".to_string()];
         options.extend(promotable.iter().map(|(fingerprint, paths)| {
             let targets = paths
@@ -2914,8 +2931,39 @@ fn diff_group(group: &SkillGroup, content: bool, ignore: &[String]) -> Result<u8
         .unwrap_or(1);
     let left = &copies[first];
     let right = &copies[second];
-    let left_manifest = directory_manifest(&left.1, ignore)?;
-    let right_manifest = directory_manifest(&right.1, ignore)?;
+    let changes = directory_diff(&left.1, &right.1, content, ignore)?;
+    if JSON_OUTPUT.load(Ordering::Relaxed) {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "skill": group.name,
+                "left": left.0,
+                "right": right.0,
+                "changes": changes,
+            }))?
+        );
+        return Ok(if changes.is_empty() {
+            EXIT_OK
+        } else {
+            EXIT_CONFLICTS
+        });
+    }
+    render_text_diff(&target_label(&left.0), &target_label(&right.0), &changes);
+    Ok(if changes.is_empty() {
+        EXIT_OK
+    } else {
+        EXIT_CONFLICTS
+    })
+}
+
+fn directory_diff(
+    left: &Path,
+    right: &Path,
+    content: bool,
+    ignore: &[String],
+) -> Result<Vec<DiffChange>> {
+    let left_manifest = directory_manifest(left, ignore)?;
+    let right_manifest = directory_manifest(right, ignore)?;
     let names: BTreeSet<_> = left_manifest
         .keys()
         .chain(right_manifest.keys())
@@ -2951,29 +2999,17 @@ fn diff_group(group: &SkillGroup, content: bool, ignore: &[String]) -> Result<u8
             _ => {}
         }
     }
-    if JSON_OUTPUT.load(Ordering::Relaxed) {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "skill": group.name,
-                "left": left.0,
-                "right": right.0,
-                "changes": changes,
-            }))?
-        );
-        return Ok(if changes.is_empty() {
-            EXIT_OK
-        } else {
-            EXIT_CONFLICTS
-        });
-    }
+    Ok(changes)
+}
+
+fn render_text_diff(left: &str, right: &str, changes: &[DiffChange]) {
     println!(
         "{} {} {}",
-        theme::agent(&target_label(&left.0)),
+        theme::agent(left),
         theme::dim("↔"),
-        theme::agent(&target_label(&right.0))
+        theme::agent(right)
     );
-    for change in &changes {
+    for change in changes {
         let mark = match change.status {
             'A' => theme::good_count(change.status),
             'D' => theme::bad_count(change.status),
@@ -2986,9 +3022,6 @@ fn diff_group(group: &SkillGroup, content: bool, ignore: &[String]) -> Result<u8
     }
     if changes.is_empty() {
         println!("{} Copies are identical.", theme::ok());
-        Ok(EXIT_OK)
-    } else {
-        Ok(EXIT_CONFLICTS)
     }
 }
 
@@ -4250,6 +4283,12 @@ mod tests {
         let group = &result.groups["stax"];
         let selected = fingerprint(&claude).unwrap();
         let archive = temp.path().join("archive/stax");
+        let changes = directory_diff(&canonical, &claude, true, &config.ignore).unwrap();
+        let patch = changes[0].content.as_deref().unwrap();
+        assert!(patch.contains("--- a/SKILL.md"));
+        assert!(patch.contains("+++ b/SKILL.md"));
+        assert!(patch.contains("-old canonical"));
+        assert!(patch.contains("+new version"));
         let plan = plan_promote_version_at(
             &config,
             group,
