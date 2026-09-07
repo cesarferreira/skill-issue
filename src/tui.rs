@@ -559,11 +559,22 @@ impl App {
             Span::raw("  "),
             Span::styled(format!(" {pending} pending "), self.pill(ACCENT)),
         ]);
-        let tabs = Tabs::new(["SKILLS", "AGENTS", "HEALTH"])
-            .select(self.view.index())
-            .style(self.style(MUTED))
-            .highlight_style(self.style(BRAND).add_modifier(Modifier::BOLD))
-            .divider("  ");
+        let tabs = Tabs::new(View::ALL.map(|view| {
+            let label = match view {
+                View::Skills => "SKILLS",
+                View::Agents => "AGENTS",
+                View::Health => "HEALTH",
+            };
+            if view == self.view {
+                format!("[ {label} ]")
+            } else {
+                format!("  {label}  ")
+            }
+        }))
+        .select(self.view.index())
+        .style(self.style(MUTED))
+        .highlight_style(self.pill(BRAND))
+        .divider(Span::styled(" │ ", self.style(MUTED)));
         let context = Paragraph::new(format!(
             "{total} skills  ·  {} agents",
             self.enabled_target_count()
@@ -585,8 +596,8 @@ impl App {
             frame.render_widget(title, rows[0]);
             frame.render_widget(summary_health, rows[1]);
             frame.render_widget(summary_issues, rows[2]);
-            if area.width >= 52 {
-                let navigation = Layout::horizontal([Constraint::Min(24), Constraint::Length(24)])
+            if area.width >= 70 {
+                let navigation = Layout::horizontal([Constraint::Min(40), Constraint::Length(24)])
                     .split(rows[3]);
                 frame.render_widget(tabs, navigation[0]);
                 frame.render_widget(context, navigation[1]);
@@ -601,7 +612,7 @@ impl App {
             frame.render_widget(title, top[0]);
             frame.render_widget(Paragraph::new(summary).alignment(Alignment::Right), top[1]);
             let navigation =
-                Layout::horizontal([Constraint::Min(24), Constraint::Length(24)]).split(rows[1]);
+                Layout::horizontal([Constraint::Min(40), Constraint::Length(24)]).split(rows[1]);
             frame.render_widget(tabs, navigation[0]);
             frame.render_widget(context, navigation[1]);
         }
@@ -814,7 +825,7 @@ impl App {
             vertical: 1,
         });
         let rows = Layout::vertical([
-            Constraint::Length(4),
+            Constraint::Length(3),
             Constraint::Length(2),
             Constraint::Min(5),
         ])
@@ -831,14 +842,40 @@ impl App {
         } else {
             managed as f64 / total as f64
         };
+        let gauge_area = rows[0];
         frame.render_widget(
             Gauge::default()
                 .block(self.panel(" Canonical health "))
                 .gauge_style(self.style(GOOD).add_modifier(Modifier::BOLD))
                 .ratio(ratio)
-                .label(format!("{managed}/{total} fully managed")),
-            rows[0],
+                .label(""),
+            gauge_area,
         );
+        let available = gauge_area.width.saturating_sub(2);
+        let full_label = format!(" {managed}/{total} fully managed ");
+        let label = if full_label.chars().count() as u16 <= available {
+            full_label
+        } else {
+            format!(" {managed}/{total} ")
+        };
+        let label_width = (label.chars().count() as u16).min(available);
+        if label_width > 0 && gauge_area.height > 2 {
+            let label_area = Rect::new(
+                gauge_area.x + gauge_area.width.saturating_sub(label_width) / 2,
+                gauge_area.y + gauge_area.height / 2,
+                label_width,
+                1,
+            );
+            let label_style = if self.no_color {
+                Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED)
+            } else {
+                Style::default()
+                    .fg(Color::White)
+                    .bg(Color::Rgb(15, 23, 42))
+                    .add_modifier(Modifier::BOLD)
+            };
+            frame.render_widget(Paragraph::new(label).style(label_style), label_area);
+        }
         let root_state = if self.config.root.is_dir() {
             ("● canonical root is healthy", GOOD)
         } else {
@@ -1206,6 +1243,8 @@ mod tests {
         assert_eq!(screen.matches("managed").count(), 1, "{screen}");
         assert_eq!(screen.matches("conflicts").count(), 1, "{screen}");
         assert!(screen.contains("1 skills  ·  1 agents"), "{screen}");
+        assert!(screen.contains("[ SKILLS ]"), "{screen}");
+        assert!(screen.contains("│"), "{screen}");
 
         app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE))
             .unwrap();
@@ -1317,7 +1356,9 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
             .unwrap();
         terminal.draw(|frame| app.draw(frame)).unwrap();
-        assert!(terminal.backend().to_string().contains("Agent details"));
+        let screen = terminal.backend().to_string();
+        assert!(screen.contains("Agent details"));
+        assert!(screen.contains("[ AGENTS ]"), "{screen}");
 
         app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
             .unwrap();
@@ -1328,6 +1369,41 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE))
             .unwrap();
         assert_eq!(app.view, View::Agents);
+    }
+
+    #[test]
+    fn health_gauge_label_is_centered_and_has_consistent_contrast() {
+        let (_temp, config) = fixture();
+        let mut app = App::new(config, false, false).unwrap();
+        app.view = View::Health;
+        let backend = TestBackend::new(100, 28);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let label = " 1/1 fully managed ";
+        let (label_y, label_x) = (0..buffer.area.height)
+            .find_map(|y| {
+                let row: String = (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<Vec<_>>()
+                    .concat();
+                row.find(label)
+                    .map(|byte| (y, row[..byte].chars().count() as u16))
+            })
+            .expect("gauge label should be visible");
+        let label_center = label_x + label.len() as u16 / 2;
+        assert!(
+            label_center.abs_diff(buffer.area.width / 2) <= 1,
+            "label starts at {label_x} and centers at {label_center} in width {}",
+            buffer.area.width
+        );
+        for x in label_x..label_x + label.len() as u16 {
+            let cell = &buffer[(x, label_y)];
+            assert_eq!(cell.fg, Color::White);
+            assert_eq!(cell.bg, Color::Rgb(15, 23, 42));
+        }
     }
 
     #[test]
