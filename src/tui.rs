@@ -500,7 +500,7 @@ impl App {
             area,
         );
         let chunks = Layout::vertical([
-            Constraint::Length(4),
+            Constraint::Length(if area.width < 100 { 5 } else { 3 }),
             Constraint::Min(12),
             Constraint::Length(if matches!(self.mode, Mode::Filter) {
                 4
@@ -540,18 +540,6 @@ impl App {
             ),
             Span::styled("  SKILL CONTROL CENTER", self.style(MUTED)),
         ]);
-        let metrics = Line::from(vec![
-            Span::styled(format!(" {total} skills "), self.pill(ACCENT)),
-            Span::raw("  "),
-            Span::styled(format!(" {managed} managed "), self.pill(GOOD)),
-            Span::raw("  "),
-            Span::styled(format!(" {conflicts} conflicts "), self.pill(BAD)),
-            Span::raw("  "),
-            Span::styled(
-                format!(" {} agents ", self.enabled_target_count()),
-                self.pill(BRAND),
-            ),
-        ]);
         let summary = Line::from(vec![
             Span::styled(format!(" {managed} managed "), self.pill(GOOD)),
             Span::raw(" "),
@@ -561,23 +549,62 @@ impl App {
             Span::raw(" "),
             Span::styled(format!(" {pending} pending "), self.pill(ACCENT)),
         ]);
+        let summary_health = Line::from(vec![
+            Span::styled(format!(" {managed} managed "), self.pill(GOOD)),
+            Span::raw("  "),
+            Span::styled(format!(" {broken} broken "), self.pill(WARN)),
+        ]);
+        let summary_issues = Line::from(vec![
+            Span::styled(format!(" {conflicts} conflicts "), self.pill(BAD)),
+            Span::raw("  "),
+            Span::styled(format!(" {pending} pending "), self.pill(ACCENT)),
+        ]);
         let tabs = Tabs::new(["SKILLS", "AGENTS", "HEALTH"])
             .select(self.view.index())
             .style(self.style(MUTED))
             .highlight_style(self.style(BRAND).add_modifier(Modifier::BOLD))
             .divider("  ");
-        let rows = Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-        ])
-        .margin(1)
-        .split(area);
-        let top = Layout::horizontal([Constraint::Min(24), Constraint::Length(55)]).split(rows[0]);
-        frame.render_widget(title, top[0]);
-        frame.render_widget(Paragraph::new(summary).alignment(Alignment::Right), top[1]);
-        frame.render_widget(metrics, rows[1]);
-        frame.render_widget(tabs, rows[2]);
+        let context = Paragraph::new(format!(
+            "{total} skills  ·  {} agents",
+            self.enabled_target_count()
+        ))
+        .style(self.style(MUTED))
+        .alignment(Alignment::Right);
+        let inner = area.inner(Margin {
+            horizontal: 1,
+            vertical: 0,
+        });
+        if area.width < 100 {
+            let rows = Layout::vertical([
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Length(1),
+            ])
+            .split(inner);
+            frame.render_widget(title, rows[0]);
+            frame.render_widget(summary_health, rows[1]);
+            frame.render_widget(summary_issues, rows[2]);
+            if area.width >= 52 {
+                let navigation = Layout::horizontal([Constraint::Min(24), Constraint::Length(24)])
+                    .split(rows[3]);
+                frame.render_widget(tabs, navigation[0]);
+                frame.render_widget(context, navigation[1]);
+            } else {
+                frame.render_widget(tabs, rows[3]);
+            }
+        } else {
+            let rows =
+                Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(inner);
+            let top =
+                Layout::horizontal([Constraint::Min(20), Constraint::Length(55)]).split(rows[0]);
+            frame.render_widget(title, top[0]);
+            frame.render_widget(Paragraph::new(summary).alignment(Alignment::Right), top[1]);
+            let navigation =
+                Layout::horizontal([Constraint::Min(24), Constraint::Length(24)]).split(rows[1]);
+            frame.render_widget(tabs, navigation[0]);
+            frame.render_widget(context, navigation[1]);
+        }
     }
 
     fn draw_skills(&mut self, frame: &mut Frame, area: Rect) {
@@ -1176,6 +1203,9 @@ mod tests {
         assert!(screen.contains("0 broken"));
         assert!(screen.contains("0 conflicts"));
         assert!(screen.contains("0 pending"));
+        assert_eq!(screen.matches("managed").count(), 1, "{screen}");
+        assert_eq!(screen.matches("conflicts").count(), 1, "{screen}");
+        assert!(screen.contains("1 skills  ·  1 agents"), "{screen}");
 
         app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE))
             .unwrap();
@@ -1209,6 +1239,20 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| app.draw(frame)).unwrap();
         assert!(!terminal.backend().to_string().trim().is_empty());
+    }
+
+    #[test]
+    fn narrow_dashboard_keeps_the_summary_visible() {
+        let (_temp, config) = fixture();
+        let mut app = App::new(config, false, false).unwrap();
+        let backend = TestBackend::new(50, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let screen = terminal.backend().to_string();
+        assert!(screen.contains("managed"), "{screen}");
+        assert!(screen.contains("broken"), "{screen}");
+        assert!(screen.contains("conflicts"), "{screen}");
+        assert!(screen.contains("pending"), "{screen}");
     }
 
     #[test]
