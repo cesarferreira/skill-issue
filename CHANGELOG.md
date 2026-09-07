@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.0] - 2026-09-07
+
+### 🐛 Bug Fixes
+
+- Fix tui
+
+### 💼 Other
+
+- Added sync to the TUI
+- Tui fix
+- Added test coverage
 ## [0.4.0] - 2026-09-07
 
 ### 🚀 Features
