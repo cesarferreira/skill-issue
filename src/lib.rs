@@ -1625,7 +1625,10 @@ fn has_divergent_physical_copies(group: &SkillGroup) -> bool {
 }
 
 fn needs_adoption(group: &SkillGroup) -> bool {
-    group.status() != SkillStatus::Managed
+    group
+        .installations
+        .iter()
+        .any(|installation| installation.kind == InstallationKind::Physical)
 }
 
 fn add_missing_target_links(
@@ -4296,6 +4299,25 @@ mod tests {
                 .to_string()
                 .contains("stax has divergent copies")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn broken_links_without_a_physical_copy_do_not_enter_adoption() {
+        let (temp, config) = fixture();
+        let canonical = config.root.join("foo");
+        skill(&canonical, "canonical");
+        std::os::unix::fs::symlink(
+            temp.path().join("missing"),
+            config.targets["claude"].path.join("foo"),
+        )
+        .unwrap();
+
+        let result = scan(&config).unwrap();
+        let group = &result.groups["foo"];
+        assert_eq!(group.status(), SkillStatus::Broken);
+        assert!(!needs_adoption(group));
+        assert!(plans_for_group(&config, group, false).unwrap().is_empty());
     }
 
     #[cfg(unix)]
