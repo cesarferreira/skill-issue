@@ -168,8 +168,14 @@ si targets add opencode ~/.config/opencode/skills
 Requires Rust 1.85+.
 
 ```bash
-cargo install --git https://github.com/cesarferreira/skill-issue.git --locked
+cargo install skill-issue
 si --help
+```
+
+From git:
+
+```bash
+cargo install --git https://github.com/cesarferreira/skill-issue.git --locked
 ```
 
 ## License
