@@ -699,7 +699,16 @@ fn inspect_installation(
         let raw_target = fs::read_link(&path)?;
         let resolved = resolve_link_path(&path, &raw_target);
         let exists = resolved.is_dir();
-        let managed = is_canonical_skill_path(&config.root, &resolved);
+        // `resolved` is only one symlink hop away from `path`; a link that chains
+        // through another managed symlink before reaching the canonical root
+        // (e.g. .claude/skills/foo -> .agents/skills/foo -> root/foo) must be
+        // fully resolved before comparing against the canonical root, or it gets
+        // misclassified as foreign even though it ultimately points at canonical.
+        let managed = exists
+            && fs::canonicalize(&resolved)
+                .ok()
+                .zip(fs::canonicalize(&config.root).ok())
+                .is_some_and(|(full, root)| is_canonical_skill_path(&root, &full));
         let kind = if !exists {
             InstallationKind::BrokenSymlink
         } else if managed {
@@ -4237,6 +4246,28 @@ mod tests {
             result.groups["missing"].installations[0].kind,
             InstallationKind::BrokenSymlink
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn chained_symlinks_that_ultimately_reach_canonical_are_managed() {
+        let (_temp, config) = fixture();
+        let canonical = config.root.join("foo");
+        skill(&canonical, "body");
+        std::os::unix::fs::symlink(&canonical, config.targets["codex"].path.join("foo")).unwrap();
+        std::os::unix::fs::symlink(
+            config.targets["codex"].path.join("foo"),
+            config.targets["claude"].path.join("foo"),
+        )
+        .unwrap();
+        let result = scan(&config).unwrap();
+        let installations = &result.groups["foo"].installations;
+        let claude = installations
+            .iter()
+            .find(|i| i.target == "claude")
+            .unwrap();
+        assert_eq!(claude.kind, InstallationKind::ManagedSymlink);
+        assert_eq!(result.groups["foo"].status(), SkillStatus::Managed);
     }
 
     #[cfg(unix)]
